@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TypeMeter | Modern Typing Speed Test</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <div class="logo">
+            <i class="fa-solid fa-gauge-high"></i>
+            <span>TypeMeter</span>
+        </div>
+        <div class="nav-controls">
+            <button id="theme-toggle" class="btn-icon" title="Toggle Theme">
+                <i class="fa-solid fa-moon"></i>
+            </button>
+            <a href="https://github." class="btn-icon" target="_blank" title="GitHub Repository" id="github-link">
+                <i class="fa-brands fa-github"></i>
+            </a>
+        </div>
+    </header>
+
+    <main>
+        <!-- Settings Panel -->
+        <section class="config-card">
+            <div class="config-group">
+                <span class="config-label">Difficulty</span>
+                <div class="option-buttons" id="difficulty-options">
+                    <button class="option-btn active" data-val="easy">Easy</button>
+                    <button class="option-btn" data-val="medium">Medium</button>
+                    <button class="option-btn" data-val="hard">Hard</button>
+                </div>
+            </div>
+
+            <div class="config-group">
+                <span class="config-label">Words</span>
+                <div class="option-buttons" id="word-count-options">
+                    <button class="option-btn" data-val="10">10</button>
+                    <button class="option-btn active" data-val="25">25</button>
+                    <button class="option-btn" data-val="50">50</button>
+                    <button class="option-btn" data-val="100">100</button>
+                    <button class="option-btn" data-val="custom">Custom</button>
+                </div>
+                <input type="number" id="custom-words" class="custom-words-input" style="display: none;" min="1" max="500" value="25">
+            </div>
+        </section>
+
+        <!-- Typing Arena -->
+        <section class="typing-container" id="arena">
+            <div class="focus-overlay" id="focus-prompt">
+                <div class="focus-text">
+                    <i class="fa-solid fa-keyboard"></i> Click here or start typing to focus
+                </div>
+            </div>
+            
+            <input type="text" id="hidden-input" autocomplete="off" autocapitalize="none" spellcheck="false">
+            
+            <div class="words-wrapper" id="words-container">
+                <div class="caret" id="caret"></div>
+                <!-- Words and characters will be dynamically generated here -->
+            </div>
+        </section>
+
+        <!-- Dynamic Actions -->
+        <section class="controls">
+            <div style="text-align: center;">
+                <button class="btn-restart" id="btn-restart">
+                    <i class="fa-solid fa-rotate-right"></i> Restart
+                </button>
+                <div class="tip-label">
+                    Tip: Press <kbd>Tab</kbd> + <kbd>Enter</kbd> to restart anytime
+                </div>
+            </div>
+        </section>
+
+        <!-- Dashboard / Results Cards -->
+        <section class="results-card" id="results-panel">
+            <div class="results-header">
+                <div class="results-title">
+                    <i class="fa-solid fa-chart-simple"></i> Test Performance
+                </div>
+                <div class="tip-label" style="margin-top: 0;">
+                    Click Restart to play again
+                </div>
+            </div>
+            
+            <div class="grid-stats">
+                <div class="stat-box highlighted">
+                    <div class="stat-val" id="res-wpm">0</div>
+                    <div class="stat-lbl">WPM</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-val" id="res-accuracy">0%</div>
+                    <div class="stat-lbl">Accuracy</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-val" id="res-raw-wpm">0</div>
+                    <div class="stat-lbl">Raw WPM</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-val" id="res-time">0s</div>
+                    <div class="stat-lbl">Time Taken</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-val" id="res-mistakes">0</div>
+                    <div class="stat-lbl">Mistakes</div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>TypeMeter local GUI. Made with <i class="fa-solid fa-heart" style="color: var(--incorrect);"></i> for speed typists.</p>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="words.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
