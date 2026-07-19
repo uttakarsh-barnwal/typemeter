@@ -1,12 +1,14 @@
 // State Variables
 let targetWords = [];
-let typedText = "";
+let typedWords = [];
+let activeWordIndex = 0;
 let startTime = null;
 let endTime = null;
 let isTesting = false;
 let currentDifficulty = "easy";
 let wordCountMode = "25";
 let customWordCount = 25;
+let caretTimeout = null;
 
 // Elements
 const wordsContainer = document.getElementById("words-container");
@@ -92,6 +94,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Keyboard controls
     hiddenInput.addEventListener("input", handleInput);
+    hiddenInput.addEventListener("keydown", handleKeydown);
     
     // Global shortcut for Restart (Tab + Enter)
     document.addEventListener("keydown", (e) => {
@@ -137,8 +140,78 @@ function focusInput() {
     hiddenInput.focus();
 }
 
+// Helper for mixing words randomly (Fisher-Yates Shuffle)
+function shuffleArray(array) {
+    for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+    }
+    return array;
+}
+
 // Ported sentence generator from typemeter.py
 function generateSentence() {
+    // Determine target word count
+    let count = wordCountMode === "custom" ? customWordCount : parseInt(wordCountMode);
+    if (isNaN(count) || count < 1) count = 25;
+
+    // Check if the Google common words database is available in the window scope
+    if (window.googleWords && Array.isArray(window.googleWords)) {
+        try {
+            const easyPool = window.googleWords.slice(0, 600);       // Top 600 most common words
+            const mediumPool = window.googleWords.slice(600, 1400);   // Ranks 600 - 1400
+            const hardPool = window.googleWords.slice(1400);          // Ranks 1400 - 1952 (less common)
+
+            let sentenceList = [];
+            
+            if (currentDifficulty === "easy") {
+                // Easy: strictly most common words
+                for (let i = 0; i < count; i++) {
+                    const rIdx = Math.floor(Math.random() * easyPool.length);
+                    sentenceList.push(easyPool[rIdx]);
+                }
+            } else if (currentDifficulty === "medium") {
+                // Medium: 40% Easy words, 60% Medium words
+                const mediumCount = Math.round(count * 0.6);
+                const easyCount = count - mediumCount;
+
+                for (let i = 0; i < easyCount; i++) {
+                    const rIdx = Math.floor(Math.random() * easyPool.length);
+                    sentenceList.push(easyPool[rIdx]);
+                }
+                for (let i = 0; i < mediumCount; i++) {
+                    const rIdx = Math.floor(Math.random() * mediumPool.length);
+                    sentenceList.push(mediumPool[rIdx]);
+                }
+                shuffleArray(sentenceList);
+            } else {
+                // Hard: 60% Easy/Medium words, 40% Hard academic words
+                const hardCount = Math.round(count * 0.4);
+                const easyMediumCount = count - hardCount;
+
+                // Easy/Medium pool combined
+                const easyMediumPool = [...easyPool, ...mediumPool];
+                // Hard pool combined with academic lists
+                const combinedHardPool = [...hardPool, ...wordsDatabaseHard];
+
+                for (let i = 0; i < easyMediumCount; i++) {
+                    const rIdx = Math.floor(Math.random() * easyMediumPool.length);
+                    sentenceList.push(easyMediumPool[rIdx]);
+                }
+                for (let i = 0; i < hardCount; i++) {
+                    const rIdx = Math.floor(Math.random() * combinedHardPool.length);
+                    sentenceList.push(combinedHardPool[rIdx]);
+                }
+                shuffleArray(sentenceList);
+            }
+            
+            return sentenceList;
+        } catch (err) {
+            console.warn("Google words dynamic generation failed, falling back to local database", err);
+        }
+    }
+
+    // Fallback to local database (words.js database)
     let db;
     if (currentDifficulty === "easy") {
         db = [...wordsDatabaseEasy];
@@ -148,11 +221,9 @@ function generateSentence() {
         db = [...wordsDatabaseHard];
     }
 
-    // Deduplicate array using Set, just like python does: set1 = set(words_database)
-    let words = Array.from(new Set(db));
-    
-    // Determine target word count
-    let count = wordCountMode === "custom" ? customWordCount : parseInt(wordCountMode);
+    // Deduplicate array using Set, and filter keeping words >= 3 chars or whitelisted common short words
+    const allowedShort = new Set(["a", "i", "of", "to", "in", "it", "is", "on", "by", "or", "be", "at", "as", "an", "we", "us", "if", "my", "do", "no", "he", "up", "so", "am", "me", "go"]);
+    let words = Array.from(new Set(db)).filter(w => w.length >= 3 || allowedShort.has(w));
     
     // Make sure we have enough unique words
     if (count > words.length) {
@@ -195,15 +266,15 @@ function renderWords() {
             spaceSpan.innerHTML = "&nbsp;"; // space char representation
             wordDiv.appendChild(spaceSpan);
         }
-
-        wordsContainer.appendChild(wordDiv);
+            wordsContainer.appendChild(wordDiv);
     });
 }
 
-// Reset typing test state
+// // Reset typing test state
 function resetTest() {
     targetWords = generateSentence();
-    typedText = "";
+    typedWords = Array(targetWords.length).fill("");
+    activeWordIndex = 0;
     startTime = null;
     endTime = null;
     isTesting = false;
@@ -211,6 +282,7 @@ function resetTest() {
     resultsPanel.style.display = "none";
     
     renderWords();
+    updateTypingDisplay();
     updateCaretPosition();
     focusInput();
 }
@@ -219,78 +291,144 @@ function resetTest() {
 function updateCaretPosition() {
     const caret = document.getElementById("caret");
     const container = document.getElementById("words-container");
-    const chars = wordsContainer.querySelectorAll(".char");
+    const wordElements = container.querySelectorAll(".word");
     
-    const currentIndex = typedText.length;
+    const activeWordDiv = wordElements[activeWordIndex];
+    if (!activeWordDiv) return;
     
-    if (currentIndex < chars.length) {
-        const activeChar = chars[currentIndex];
-        
-        // Remove active class from all, add to current
-        chars.forEach((c, idx) => {
-            if (idx === currentIndex) {
-                c.classList.add("active");
-            } else {
-                c.classList.remove("active");
-            }
-        });
-
-        // Handle dynamic line scrolling (Monkeytype style)
-        const activeWord = activeChar.parentElement;
-        if (activeWord) {
-            const wordTop = activeWord.offsetTop;
-            const wordHeight = activeWord.offsetHeight;
-            const style = window.getComputedStyle(activeWord);
-            const marginBottom = parseFloat(style.marginBottom) || 0;
-            const lineHeight = wordHeight + marginBottom;
-            
-            // Padding inside the words wrapper is 2.5rem = 40px
-            const firstWord = container.querySelector(".word");
-            const containerPaddingTop = firstWord ? firstWord.offsetTop : 40;
-            
-            // If we are on line 3 or below: scroll so that active line is visually the 2nd line
-            if (wordTop > containerPaddingTop + lineHeight) {
-                container.scrollTop = wordTop - containerPaddingTop - lineHeight;
-            } else {
-                container.scrollTop = 0;
-            }
+    // Remove active class from all chars in container
+    container.querySelectorAll(".char").forEach(c => c.classList.remove("active"));
+    
+    const typedLen = typedWords[activeWordIndex].length;
+    const charSpans = activeWordDiv.querySelectorAll(".char:not(.space-char)");
+    
+    let targetSpan = null;
+    let placeAfter = false;
+    
+    if (typedLen < charSpans.length) {
+        targetSpan = charSpans[typedLen];
+        if (targetSpan) {
+            targetSpan.classList.add("active");
         }
-
-        const charRect = activeChar.getBoundingClientRect();
+    } else {
+        targetSpan = charSpans[charSpans.length - 1];
+        placeAfter = true;
+    }
+    
+    // Handle dynamic line scrolling (Monkeytype style)
+    const wordTop = activeWordDiv.offsetTop;
+    const wordHeight = activeWordDiv.offsetHeight;
+    const style = window.getComputedStyle(activeWordDiv);
+    const marginBottom = parseFloat(style.marginBottom) || 0;
+    const lineHeight = wordHeight + marginBottom;
+    
+    const firstWord = container.querySelector(".word");
+    const containerPaddingTop = firstWord ? firstWord.offsetTop : 40;
+    
+    if (wordTop > containerPaddingTop + lineHeight) {
+        container.scrollTop = wordTop - containerPaddingTop - lineHeight;
+    } else {
+        container.scrollTop = 0;
+    }
+    
+    if (targetSpan) {
+        const charRect = targetSpan.getBoundingClientRect();
         const containerRect = container.getBoundingClientRect();
         
-        caret.style.left = `${charRect.left - containerRect.left + container.scrollLeft}px`;
+        if (placeAfter) {
+            caret.style.left = `${charRect.right - containerRect.left + container.scrollLeft}px`;
+        } else {
+            caret.style.left = `${charRect.left - containerRect.left + container.scrollLeft}px`;
+        }
         caret.style.top = `${charRect.top - containerRect.top + container.scrollTop}px`;
         caret.style.height = `${charRect.height}px`;
         caret.style.display = "block";
-    } else {
-        // We reached the end of the text
-        chars.forEach(c => c.classList.remove("active"));
-        const lastChar = chars[chars.length - 1];
-        if (lastChar) {
-            // First ensure we keep scroll at bottom
-            const containerPaddingTop = 40;
-            const lastWord = lastChar.parentElement;
-            if (lastWord) {
-                const wordTop = lastWord.offsetTop;
-                const wordHeight = lastWord.offsetHeight;
-                const style = window.getComputedStyle(lastWord);
-                const marginBottom = parseFloat(style.marginBottom) || 0;
-                const lineHeight = wordHeight + marginBottom;
-                
-                if (wordTop > containerPaddingTop + lineHeight) {
-                    container.scrollTop = wordTop - containerPaddingTop - lineHeight;
+    }
+}
+
+// Render dynamic visual feedback for typed words, handling extra characters Monkeytype-style
+function updateTypingDisplay() {
+    const wordElements = wordsContainer.querySelectorAll(".word");
+    
+    targetWords.forEach((targetWord, wIdx) => {
+        const wordDiv = wordElements[wIdx];
+        if (!wordDiv) return;
+        
+        const typedWord = typedWords[wIdx] || "";
+        const charSpans = wordDiv.querySelectorAll(".char:not(.extra):not(.space-char)");
+        
+        // 1. Update target characters
+        for (let cIdx = 0; cIdx < targetWord.length; cIdx++) {
+            const charSpan = charSpans[cIdx];
+            if (!charSpan) continue;
+            
+            if (cIdx < typedWord.length) {
+                if (typedWord[cIdx] === targetWord[cIdx]) {
+                    charSpan.className = "char correct";
+                } else {
+                    charSpan.className = "char incorrect";
+                }
+            } else {
+                if (wIdx < activeWordIndex) {
+                    charSpan.className = "char incorrect untyped";
+                } else {
+                    charSpan.className = "char";
                 }
             }
-
-            const charRect = lastChar.getBoundingClientRect();
-            const containerRect = container.getBoundingClientRect();
+        }
+        
+        // 2. Handle extra characters
+        // First remove all existing extra character spans in this word
+        const existingExtras = wordDiv.querySelectorAll(".char.extra");
+        existingExtras.forEach(el => el.remove());
+        
+        // If typed word length is greater than target word length, append extra character spans
+        if (typedWord.length > targetWord.length) {
+            const spaceSpan = wordDiv.querySelector(".space-char");
             
-            // Caret should go right after the last character
-            caret.style.left = `${charRect.right - containerRect.left + container.scrollLeft}px`;
-            caret.style.top = `${charRect.top - containerRect.top + container.scrollTop}px`;
-            caret.style.height = `${charRect.height}px`;
-            caret.style.display = "block";
+            for (let eIdx = targetWord.length; eIdx < typedWord.length; eIdx++) {
+                const extraSpan = document.createElement("span");
+                extraSpan.className = "char incorrect extra";
+                extraSpan.textContent = typedWord[eIdx];
+                
+                if (spaceSpan) {
+                    wordDiv.insertBefore(extraSpan, spaceSpan);
+                } else {
+                    wordDiv.appendChild(extraSpan);
+                }
+            }
+        }
+    });
+}
+
+// Intercept specific keydowns for word transitions (Spacebar / empty Backspace)
+function handleKeydown(e) {
+    if (e.key === " ") {
+        e.preventDefault();
+        
+        // Save current input
+        typedWords[activeWordIndex] = hiddenInput.value;
+        
+        if (activeWordIndex < targetWords.length - 1) {
+            // Move to next word
+            activeWordIndex++;
+            hiddenInput.value = "";
+            typedWords[activeWordIndex] = "";
+            updateTypingDisplay();
+            updateCaretPosition();
+        } else {
+            // Space pressed on last word -> complete test!
+            completeTest();
+        }
+    } else if (e.key === "Backspace") {
+        if (hiddenInput.value === "" && activeWordIndex > 0) {
+            e.preventDefault();
+            
+            // Move to previous word
+            activeWordIndex--;
+            hiddenInput.value = typedWords[activeWordIndex];
+            updateTypingDisplay();
+            updateCaretPosition();
         }
     }
 }
@@ -299,45 +437,55 @@ function updateCaretPosition() {
 function handleInput(e) {
     const inputVal = hiddenInput.value;
     
+    // Temporarily pause caret blinking animation while typing
+    const caret = document.getElementById("caret");
+    if (caret) {
+        caret.classList.add("typing");
+        clearTimeout(caretTimeout);
+        caretTimeout = setTimeout(() => {
+            caret.classList.remove("typing");
+        }, 500);
+    }
+    
     // Start timer on first keystroke
     if (!isTesting && inputVal.length > 0) {
         isTesting = true;
         startTime = new Date().getTime();
     }
     
-    typedText = inputVal;
-    
-    const chars = wordsContainer.querySelectorAll(".char");
-    const targetString = targetWords.join(" "); // Reconstruction of target text with spaces
-    
-    // Style characters up to the input length
-    for (let i = 0; i < chars.length; i++) {
-        const charSpan = chars[i];
+    // Mobile auto-space conversion: some mobile keyboards insert a space on word autocomplete
+    if (inputVal.endsWith(" ")) {
+        const trimmed = inputVal.slice(0, -1);
+        hiddenInput.value = trimmed;
+        typedWords[activeWordIndex] = trimmed;
         
-        if (i < typedText.length) {
-            // Retrieve exact character representation for target (treating space spans correctly)
-            const targetChar = charSpan.classList.contains("space-char") ? " " : charSpan.textContent;
-            const typedChar = typedText[i];
-            
-            if (typedChar === targetChar) {
-                charSpan.classList.add("correct");
-                charSpan.classList.remove("incorrect");
-            } else {
-                charSpan.classList.add("incorrect");
-                charSpan.classList.remove("correct");
-            }
+        if (activeWordIndex < targetWords.length - 1) {
+            activeWordIndex++;
+            hiddenInput.value = "";
+            typedWords[activeWordIndex] = "";
+            updateTypingDisplay();
+            updateCaretPosition();
         } else {
-            // Reset characters that are ahead of user typing
-            charSpan.classList.remove("correct", "incorrect");
+            // Space pressed on last word -> complete test!
+            completeTest();
+        }
+        return;
+    }
+    
+    // Save typed characters for active word
+    typedWords[activeWordIndex] = inputVal;
+    
+    // Check if we are on the last word
+    if (activeWordIndex === targetWords.length - 1) {
+        // If the user types the last letter of the last word correctly, end immediately
+        if (typedWords[activeWordIndex] === targetWords[activeWordIndex]) {
+            completeTest();
+            return;
         }
     }
     
+    updateTypingDisplay();
     updateCaretPosition();
-    
-    // Check if test is completed
-    if (typedText.length >= targetString.length) {
-        completeTest();
-    }
 }
 
 // Complete the typing test and calculate metrics
@@ -349,24 +497,13 @@ function completeTest() {
     const minutes = timeTaken / 60;
     
     const targetString = targetWords.join(" ");
+    const attemptString = typedWords.join(" ");
     
-    // Calculate mistakes and accuracy EXACTLY mirroring typemeter.py's comparison logic:
-    // mistake = 0
-    // i = 0
-    // while(i<len(example)):
-    //     if(i<len(attempt_list)):
-    //         if(example[i] != attempt_list[i]):
-    //             mistake+=1
-    //     else:
-    //         break
-    //     i+=1
-    // if(i<len(attempt_list)):
-    //     mistake = mistake + (len(attempt_list)-i)
-    // mistake = mistake + (len(example) - i)
+    // Calculate mistakes and accuracy character-by-character matching typemeter.py's comparison logic
     let mistakeCount = 0;
     let i = 0;
     const example = targetString;
-    const attempt = typedText;
+    const attempt = attemptString;
     
     while (i < example.length) {
         if (i < attempt.length) {
@@ -395,8 +532,8 @@ function completeTest() {
     // raw_wpm = attempted_words_count/minute
     // wpm = correct_count/minute
     // where correct_count is word level matching
-    const actualWords = targetString.split(" ");
-    const attemptedWords = attempt.trim().split(/\s+/).filter(w => w.length > 0);
+    const actualWords = targetWords;
+    const attemptedWords = typedWords.map(w => w.trim()).filter(w => w.length > 0);
     
     const actualWordsCount = actualWords.length;
     const attemptedWordsCount = attemptedWords.length;
@@ -404,7 +541,7 @@ function completeTest() {
     
     let correctWordsCount = 0;
     for (let wIdx = 0; wIdx < minLength; wIdx++) {
-        if (actualWords[wIdx] === attemptedWords[wIdx]) {
+        if (actualWords[wIdx] === typedWords[wIdx]) {
             correctWordsCount++;
         }
     }

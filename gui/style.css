@@ -233,7 +233,7 @@ main {
     user-select: none;
     position: relative;
     outline: none;
-    max-height: 180px;
+    height: 6.6rem;
     overflow: hidden;
 }
 
@@ -259,19 +259,36 @@ main {
     border-radius: 2px;
 }
 
+.char.incorrect.untyped {
+    color: rgba(239, 68, 68, 0.4); /* Faded red for skipped characters */
+    background-color: transparent;
+}
+
+.char.extra {
+    color: #b91c1c; /* Darker red for extra characters */
+    text-decoration: underline;
+    background-color: transparent;
+}
+
 /* Breathing Animated Caret */
 .caret {
     position: absolute;
-    width: 2px;
+    width: 3px;
     height: 1.4rem;
     background-color: var(--accent);
-    border-radius: 2px;
-    box-shadow: 0 0 8px var(--accent);
+    border-radius: 4px;
+    box-shadow: 0 0 10px var(--accent), 0 0 4px var(--accent);
     top: 4px;
     left: 0;
-    animation: caretBlink 1s infinite;
+    animation: caretBlink 1.2s infinite;
     pointer-events: none;
-    transition: left 0.1s ease, top 0.15s ease;
+    transition: left 0.08s ease, top 0.12s ease;
+}
+
+.caret.typing {
+    animation: none;
+    opacity: 1;
+    box-shadow: 0 0 14px var(--accent), 0 0 6px var(--accent);
 }
 
 @keyframes caretBlink {
