@@ -6,6 +6,9 @@ import threading
 import os
 import sys
 import socket
+from urllib.parse import urlparse, parse_qs
+import json
+import typemeter_db
 
 # Port configurations
 START_PORT = 8000
@@ -23,10 +26,96 @@ def get_free_port(start_port):
     raise OSError("Could not find an open port.")
 
 class QuietHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
-    """A SimpleHTTPRequestHandler that suppresses standard logger output to keep console clean."""
+    """A SimpleHTTPRequestHandler that suppresses standard logger output, handles session cookies, and implements the API endpoints."""
     def log_message(self, format, *args):
         # Disable logging for static files to keep standard output tidy.
         pass
+
+    def get_db(self):
+        return typemeter_db.get_db("typemeter.db")
+
+    def resolve_identity_id(self):
+        if hasattr(self, '_resolved_identity_id'):
+            return self._resolved_identity_id
+            
+        cookie_header = self.headers.get('Cookie', '')
+        cookies = {}
+        for item in cookie_header.split(';'):
+            item = item.strip()
+            if '=' in item:
+                k, v = item.split('=', 1)
+                cookies[k] = v
+                
+        if 'identity_id' in cookies:
+            self._resolved_identity_id = cookies['identity_id']
+            self._cookie_already_present = True
+        else:
+            import uuid
+            self._resolved_identity_id = str(uuid.uuid4())
+            self._cookie_already_present = False
+            
+        return self._resolved_identity_id
+
+    def end_headers(self):
+        identity_id = self.resolve_identity_id()
+        if not getattr(self, '_cookie_already_present', False):
+            self.send_header('Set-Cookie', f"identity_id={identity_id}; Max-Age=31536000; HttpOnly; Path=/")
+        super().end_headers()
+
+    def do_GET(self):
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == '/api/words':
+            params = parse_qs(parsed_path.query)
+            difficulty = params.get('difficulty', ['easy'])[0]
+            count_str = params.get('count', ['25'])[0]
+            try:
+                count = int(count_str)
+            except ValueError:
+                count = 25
+                
+            identity_id = self.resolve_identity_id()
+            
+            # Select words using mistake weightings
+            conn = self.get_db()
+            try:
+                words = typemeter_db.backend_select_words(conn, difficulty, count, identity_id)
+            finally:
+                conn.close()
+                
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(words).encode('utf-8'))
+        else:
+            super().do_GET()
+
+    def do_POST(self):
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == '/api/mistakes':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            
+            try:
+                records = json.loads(post_data.decode('utf-8'))
+            except Exception as e:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"Invalid JSON")
+                return
+                
+            identity_id = self.resolve_identity_id()
+            
+            conn = self.get_db()
+            try:
+                typemeter_db.ingest_mistakes(conn, identity_id, records)
+            finally:
+                conn.close()
+                
+            self.send_response(204)
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 def start_server(port, directory):
     """Runs a local socket server on the given port serving files in directory."""

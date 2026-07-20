@@ -1,0 +1,12 @@
+instructions.md
+
+# SQLite database files
+*.db
+*.db-wal
+*.db-shm
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd

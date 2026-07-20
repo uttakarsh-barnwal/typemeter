@@ -149,12 +149,29 @@ function shuffleArray(array) {
     return array;
 }
 
-// Ported sentence generator from typemeter.py
-function generateSentence() {
-    // Determine target word count
+// Ported sentence generator from typemeter.py (async fetches backend weighted selection)
+async function generateSentence() {
     let count = wordCountMode === "custom" ? customWordCount : parseInt(wordCountMode);
     if (isNaN(count) || count < 1) count = 25;
 
+    try {
+        const response = await fetch(`/api/words?difficulty=${currentDifficulty}&count=${count}`);
+        if (!response.ok) {
+            throw new Error(`HTTP error! Status: ${response.status}`);
+        }
+        const words = await response.json();
+        if (Array.isArray(words) && words.length > 0) {
+            return words;
+        }
+    } catch (err) {
+        console.warn("API word selection failed, using frontend local database fallback", err);
+    }
+
+    return generateSentenceSync(count);
+}
+
+// Synchronous local fallback for word generation
+function generateSentenceSync(count) {
     // Check if the Google common words database is available in the window scope
     if (window.googleWords && Array.isArray(window.googleWords)) {
         try {
@@ -270,9 +287,13 @@ function renderWords() {
     });
 }
 
-// // Reset typing test state
-function resetTest() {
-    targetWords = generateSentence();
+// Reset typing test state
+async function resetTest() {
+    try {
+        targetWords = await generateSentence();
+    } catch (err) {
+        console.error("Failed to generate sentence:", err);
+    }
     typedWords = Array(targetWords.length).fill("");
     activeWordIndex = 0;
     startTime = null;
@@ -528,26 +549,19 @@ function completeTest() {
         accuracy = Math.abs(accuracy);
     }
     
-    // WPM and Raw WPM calculation:
-    // raw_wpm = attempted_words_count/minute
-    // wpm = correct_count/minute
-    // where correct_count is word level matching
-    const actualWords = targetWords;
-    const attemptedWords = typedWords.map(w => w.trim()).filter(w => w.length > 0);
-    
-    const actualWordsCount = actualWords.length;
-    const attemptedWordsCount = attemptedWords.length;
-    const minLength = Math.min(actualWordsCount, attemptedWordsCount);
-    
-    let correctWordsCount = 0;
-    for (let wIdx = 0; wIdx < minLength; wIdx++) {
-        if (actualWords[wIdx] === typedWords[wIdx]) {
-            correctWordsCount++;
+    // WPM and Raw WPM calculation (standardized 5 characters = 1 word):
+    // raw_wpm = (total_characters / 5) / minute
+    // wpm = (correct_characters / 5) / minute
+    let correctCharsCount = 0;
+    const minLen = Math.min(example.length, attempt.length);
+    for (let cIdx = 0; cIdx < minLen; cIdx++) {
+        if (example[cIdx] === attempt[cIdx]) {
+            correctCharsCount++;
         }
     }
     
-    const rawWpm = minutes > 0 ? (attemptedWordsCount / minutes) : 0;
-    const wpm = minutes > 0 ? (correctWordsCount / minutes) : 0;
+    const rawWpm = minutes > 0 ? ((attempt.length / 5) / minutes) : 0;
+    const wpm = minutes > 0 ? ((correctCharsCount / 5) / minutes) : 0;
     
     // Render Results
     resWpm.textContent = Math.round(wpm);
@@ -560,4 +574,53 @@ function completeTest() {
     
     // Blur input
     hiddenInput.blur();
+
+    // Build mistake-weighted n-gram capture records (excluding overflow characters)
+    const records = [];
+    targetWords.forEach((targetWord, wIdx) => {
+        const typedWord = typedWords[wIdx] || "";
+        const limit = targetWord.length;
+        
+        for (let cIdx = 0; cIdx <= limit; cIdx++) {
+            const isSpace = (cIdx === limit);
+            if (isSpace && wIdx === targetWords.length - 1) {
+                continue; // No trailing space capture on the last word
+            }
+            
+            const expectedChar = isSpace ? " " : targetWord[cIdx];
+            
+            let wasTyped = false;
+            if (isSpace) {
+                // If user moved past this word, they typed space
+                wasTyped = (wIdx < activeWordIndex || (wIdx === activeWordIndex && !isTesting));
+            } else {
+                wasTyped = (cIdx < typedWord.length);
+            }
+            
+            if (wasTyped) {
+                const typedChar = isSpace ? " " : typedWord[cIdx];
+                const isCorrect = (typedChar === expectedChar);
+                const contextBefore = targetWord.slice(Math.max(0, cIdx - 2), cIdx);
+                
+                records.push({
+                    expected_char: expectedChar,
+                    typed_char: typedChar,
+                    is_correct: isCorrect,
+                    context_before: contextBefore,
+                    word: targetWord,
+                    position_in_word: cIdx
+                });
+            }
+        }
+    });
+
+    if (records.length > 0) {
+        fetch("/api/mistakes", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(records)
+        }).catch(err => console.error("Failed to post mistake stats:", err));
+    }
 }

@@ -229,8 +229,9 @@ while True:
         accuracy = ((len(example) - mistake)/len(example))*100
         if(accuracy<0):
             accuracy = -accuracy
-        raw_wpm = attempted_words_count/minute
-        wpm = correct_count/minute
+        correct_chars = sum(1 for e_c, a_c in zip(example, attempt_list) if e_c == a_c)
+        raw_wpm = (len(attempt_list) / 5) / minute if minute > 0 else 0
+        wpm = (correct_chars / 5) / minute if minute > 0 else 0
 
         print("The accuracy is", accuracy,"%")
         print("The wpm is", wpm)
