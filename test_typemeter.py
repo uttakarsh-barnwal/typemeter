@@ -2,75 +2,20 @@
 import unittest
 import sqlite3
 import datetime
+import os
+import re
 import typemeter_db
 import fit_priors
 import math
 
 class TestTypeMeter(unittest.TestCase):
     def setUp(self):
-        # Use an in-memory SQLite database for fast isolated testing
-        self.conn = sqlite3.connect(":memory:")
-        self.conn.row_factory = sqlite3.Row
-        
-        # Initialize tables
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS unigram_stats (
-                identity_id TEXT,
-                char TEXT,
-                mistakes REAL,
-                total REAL,
-                last_updated TEXT,
-                PRIMARY KEY (identity_id, char)
-            )
-        """)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS bigram_stats (
-                identity_id TEXT,
-                prev_char TEXT,
-                char TEXT,
-                mistakes REAL,
-                total REAL,
-                last_updated TEXT,
-                PRIMARY KEY (identity_id, prev_char, char)
-            )
-        """)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS trigram_stats (
-                identity_id TEXT,
-                prev2_chars TEXT,
-                char TEXT,
-                mistakes REAL,
-                total REAL,
-                last_updated TEXT,
-                PRIMARY KEY (identity_id, prev2_chars, char)
-            )
-        """)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS global_priors (
-                level TEXT,
-                alpha REAL,
-                beta REAL,
-                fitted_at TEXT,
-                sample_size INTEGER,
-                PRIMARY KEY (level)
-            )
-        """)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS mistake_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                identity_id TEXT,
-                context_before TEXT,
-                expected_char TEXT,
-                typed_char TEXT,
-                word TEXT,
-                position_in_word INTEGER,
-                created_at TEXT
-            )
-        """)
-        self.conn.commit()
+        # Use an in-memory SQLite database initialized with all tables and indexes
+        self.conn = typemeter_db.get_db(":memory:")
         
     def tearDown(self):
         self.conn.close()
+
 
     # --- Unit Tests ---
     
@@ -227,9 +172,9 @@ class TestTypeMeter(unittest.TestCase):
         
         try:
             identity_id = "bad_typist"
-            # Ingest 10 mistakes for expected "z"
+            # Ingest 50 mistakes for expected "z" to create a strong bias
             recs = []
-            for _ in range(10):
+            for _ in range(50):
                 recs.append({
                     "expected_char": "z",
                     "typed_char": "x",
@@ -240,11 +185,11 @@ class TestTypeMeter(unittest.TestCase):
                 })
             typemeter_db.ingest_mistakes(self.conn, identity_id, recs)
             
-            # Select words over 100 trials for cold start user vs bad typist
+            # Select words over 1000 trials for cold start user vs bad typist to ensure statistical significance
             count_z_cold = 0
             count_z_biased = 0
             
-            for _ in range(100):
+            for _ in range(1000):
                 # Cold Start
                 sel_c = typemeter_db.backend_select_words(self.conn, "easy", 2, "cold_user")
                 count_z_cold += sum(1 for w in sel_c if "z" in w)
@@ -257,6 +202,297 @@ class TestTypeMeter(unittest.TestCase):
             self.assertTrue(count_z_biased > count_z_cold)
         finally:
             typemeter_db.load_word_pools = orig_load
+
+    def test_auth_password_hashing(self):
+        password = "Password123"
+        hashed = typemeter_db.hash_password(password)
+        self.assertNotEqual(password, hashed)
+        self.assertTrue(typemeter_db.verify_password(password, hashed))
+        self.assertFalse(typemeter_db.verify_password("wrong_password", hashed))
+
+    def test_auth_password_policy(self):
+        import auth
+        # Invalid: too short
+        ok, err = auth.validate_password_policy("P1")
+        self.assertFalse(ok)
+        # Invalid: no number
+        ok, err = auth.validate_password_policy("Password")
+        self.assertFalse(ok)
+        # Invalid: no letter
+        ok, err = auth.validate_password_policy("12345678")
+        self.assertFalse(ok)
+        # Valid
+        ok, err = auth.validate_password_policy("Password123")
+        self.assertTrue(ok)
+
+    def test_auth_token_hashing(self):
+        raw_token = "my_secret_token"
+        hashed = typemeter_db.hash_token(raw_token)
+        self.assertNotEqual(raw_token, hashed)
+        
+        # SHA-256 is deterministic
+        self.assertEqual(hashed, typemeter_db.hash_token(raw_token))
+
+    def test_auth_session_crud_and_timeout(self):
+        # 1. Create a user
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT INTO users (email, password_hash, auth_provider, email_verified, display_name, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?, ?)",
+            ("test_session@example.com", "hash", "password", "Tester", now, now)
+        )
+        user_id = cursor.lastrowid
+        self.conn.commit()
+
+        # 2. Create session
+        sess_id = typemeter_db.create_session(self.conn, user_id)
+        self.assertIsNotNone(sess_id)
+
+        # 3. Retrieve session
+        sess = typemeter_db.get_session(self.conn, sess_id)
+        self.assertIsNotNone(sess)
+        self.assertEqual(sess["user_id"], user_id)
+
+        # 4. Invalidate / delete session
+        typemeter_db.delete_session(self.conn, sess_id)
+        self.assertIsNone(typemeter_db.get_session(self.conn, sess_id))
+
+    def test_auth_rate_limiting(self):
+        # Max 3 requests in 60 seconds
+        self.assertTrue(typemeter_db.check_rate_limit(self.conn, "test_ip", "test_action", 3, 60))
+        self.assertTrue(typemeter_db.check_rate_limit(self.conn, "test_ip", "test_action", 3, 60))
+        self.assertTrue(typemeter_db.check_rate_limit(self.conn, "test_ip", "test_action", 3, 60))
+        
+        # 4th request must be blocked
+        self.assertFalse(typemeter_db.check_rate_limit(self.conn, "test_ip", "test_action", 3, 60))
+
+class TestAuthFlask(unittest.TestCase):
+    def setUp(self):
+        # Setup temporary SQLite database
+        self.db_path = "test_auth_flask.db"
+        if os.path.exists(self.db_path):
+            os.remove(self.db_path)
+            
+        import run_gui
+        self.app = run_gui.create_app()
+        # Configure app key
+        self.app.config["SECRET_KEY"] = "super-secret-test-key"
+        
+        # Override db path globally in db helper
+        self.orig_get_db = typemeter_db.get_db
+        typemeter_db.get_db = lambda *args, **kwargs: self.orig_get_db(self.db_path)
+        
+        self.client = self.app.test_client()
+        self.ctx = self.app.app_context()
+        self.ctx.push()
+        
+    def tearDown(self):
+        self.ctx.pop()
+        typemeter_db.get_db = self.orig_get_db
+        if os.path.exists(self.db_path):
+            os.remove(self.db_path)
+
+    def test_csrf_rejection(self):
+        # State changing POST without X-CSRF-Token header should return 403
+        res = self.client.post("/auth/login", json={"email": "test@example.com", "password": "Password123"})
+        self.assertEqual(res.status_code, 403)
+        self.assertIn(b"CSRF token missing or invalid.", res.data)
+
+    def test_signup_verify_login_logout_flow(self):
+        # 1. Fetch CSRF token
+        res_csrf = self.client.get("/auth/csrf-token")
+        self.assertEqual(res_csrf.status_code, 200)
+        csrf_token = res_csrf.get_json()["csrf_token"]
+        self.assertIsNotNone(csrf_token)
+
+        # 2. Register user
+        signup_payload = {
+            "email": "register@example.com",
+            "password": "Password123",
+            "display_name": "Tester User"
+        }
+        res_signup = self.client.post(
+            "/auth/signup",
+            headers={"X-CSRF-Token": csrf_token},
+            json=signup_payload
+        )
+        self.assertEqual(res_signup.status_code, 201)
+        self.assertIn(b"Registration successful.", res_signup.data)
+
+        # 3. Retrieve token hash from db
+        conn = self.orig_get_db(self.db_path)
+        token_row = conn.execute("SELECT * FROM email_verification_tokens").fetchone()
+        self.assertIsNotNone(token_row)
+        conn.close()
+
+        # Mock incoming verify request (since we hash, we need raw token. For tests, we cheat:
+        # we can't get raw token from hash easily, but wait! The token hash table has the raw token
+        # printed to server log. Can we fetch the raw token by intercepting typemeter_db.send_email?
+        # Yes! Let's mock send_email to capture the raw token!)
+        
+    def test_signup_with_mocked_email(self):
+        captured_emails = []
+        orig_send = typemeter_db.send_email
+        typemeter_db.send_email = lambda to, sub, body: captured_emails.append((to, sub, body))
+
+        try:
+            # 1. Fetch CSRF
+            csrf_token = self.client.get("/auth/csrf-token").get_json()["csrf_token"]
+
+            # 2. Signup
+            self.client.post(
+                "/auth/signup",
+                headers={"X-CSRF-Token": csrf_token},
+                json={"email": "mock@example.com", "password": "Password123", "display_name": "Mock"}
+            )
+            self.assertEqual(len(captured_emails), 1)
+            body = captured_emails[0][2]
+            
+            # Extract verify token
+            # format: verify_token=XYZ
+            token_match = re.search(r"verify_token=([A-Za-z0-9_\-]+)", body)
+            self.assertIsNotNone(token_match)
+            raw_token = token_match.group(1)
+
+            # 3. Verify Email
+            res_verify = self.client.get(f"/auth/verify-email?token={raw_token}")
+            self.assertEqual(res_verify.status_code, 302) # Redirects back to index.html
+            self.assertIn("verify_success", res_verify.headers["Location"])
+
+            # 4. Check user is verified in DB
+            conn = self.orig_get_db(self.db_path)
+            user_row = conn.execute("SELECT email_verified FROM users WHERE email = 'mock@example.com'").fetchone()
+            self.assertEqual(user_row["email_verified"], 1)
+            conn.close()
+
+            # 5. Login
+            res_login = self.client.post(
+                "/auth/login",
+                headers={"X-CSRF-Token": csrf_token},
+                json={"email": "mock@example.com", "password": "Password123"}
+            )
+            self.assertEqual(res_login.status_code, 200)
+
+            # 6. Check authenticated state info
+            res_me = self.client.get("/auth/me")
+            self.assertEqual(res_me.status_code, 200)
+            self.assertTrue(res_me.get_json()["authenticated"])
+            self.assertEqual(res_me.get_json()["user"]["email"], "mock@example.com")
+
+            # 7. Logout
+            res_logout = self.client.post(
+                "/auth/logout",
+                headers={"X-CSRF-Token": csrf_token}
+            )
+            self.assertEqual(res_logout.status_code, 200)
+            
+            # Check logged out
+            res_me2 = self.client.get("/auth/me")
+            self.assertFalse(res_me2.get_json()["authenticated"])
+
+        finally:
+            typemeter_db.send_email = orig_send
+
+    def test_brute_force_lockout(self):
+        csrf_token = self.client.get("/auth/csrf-token").get_json()["csrf_token"]
+        
+        # Ingest user manually to bypass signup email
+        conn = self.orig_get_db(self.db_path)
+        pwd_hash = typemeter_db.hash_password("Password123")
+        conn.execute(
+            "INSERT INTO users (email, password_hash, auth_provider, email_verified, display_name) VALUES (?, ?, 'password', 1, 'BF')",
+            ("bf@example.com", pwd_hash)
+        )
+        conn.commit()
+        conn.close()
+
+        # Submit 5 incorrect logins
+        for idx in range(5):
+            res = self.client.post(
+                "/auth/login",
+                headers={"X-CSRF-Token": csrf_token},
+                json={"email": "bf@example.com", "password": "wrong_password"}
+            )
+            # The first 4 should fail with 401, the 5th triggers 429 lockout
+            expected_status = 401 if idx < 4 else 429
+            self.assertEqual(res.status_code, expected_status)
+
+        # 6th attempt must be locked out with 429
+        res_lock = self.client.post(
+            "/auth/login",
+            headers={"X-CSRF-Token": csrf_token},
+            json={"email": "bf@example.com", "password": "Password123"} # Correct password but locked
+        )
+        self.assertEqual(res_lock.status_code, 429)
+        self.assertIn(b"locked", res_lock.data)
+
+    def test_password_reset_session_invalidation(self):
+        captured_emails = []
+        orig_send = typemeter_db.send_email
+        typemeter_db.send_email = lambda to, sub, body: captured_emails.append((to, sub, body))
+
+        try:
+            csrf_token = self.client.get("/auth/csrf-token").get_json()["csrf_token"]
+            
+            # 1. Ingest user
+            pwd_hash = typemeter_db.hash_password("Password123")
+            conn = self.orig_get_db(self.db_path)
+            conn.execute(
+                "INSERT INTO users (email, password_hash, auth_provider, email_verified) VALUES (?, ?, 'password', 1)",
+                ("reset@example.com", pwd_hash)
+            )
+            conn.commit()
+            conn.close()
+
+            # 2. Login to create active session
+            res_login = self.client.post(
+                "/auth/login",
+                headers={"X-CSRF-Token": csrf_token},
+                json={"email": "reset@example.com", "password": "Password123"}
+            )
+            self.assertEqual(res_login.status_code, 200)
+            
+            # Check session cookie exists in cookie jar
+            self.client.get("/auth/me")
+            self.assertTrue(self.client.get("/auth/me").get_json()["authenticated"])
+
+            # 3. Trigger forgot password
+            res_forgot = self.client.post(
+                "/auth/forgot-password",
+                headers={"X-CSRF-Token": csrf_token},
+                json={"email": "reset@example.com"}
+            )
+            self.assertEqual(res_forgot.status_code, 200)
+            self.assertEqual(len(captured_emails), 1)
+
+            # Extract reset token
+            body = captured_emails[0][2]
+            token_match = re.search(r"reset_token=([A-Za-z0-9_\-]+)", body)
+            self.assertIsNotNone(token_match)
+            raw_token = token_match.group(1)
+
+            # 4. Reset Password
+            res_reset = self.client.post(
+                "/auth/reset-password",
+                headers={"X-CSRF-Token": csrf_token},
+                json={"token": raw_token, "new_password": "NewPassword123"}
+            )
+            self.assertEqual(res_reset.status_code, 200)
+
+            # 5. Verify old session is invalidated (user is logged out)
+            res_me = self.client.get("/auth/me")
+            self.assertFalse(res_me.get_json()["authenticated"])
+
+            # 6. Verify login with new password works
+            res_login2 = self.client.post(
+                "/auth/login",
+                headers={"X-CSRF-Token": csrf_token},
+                json={"email": "reset@example.com", "password": "NewPassword123"}
+            )
+            self.assertEqual(res_login2.status_code, 200)
+
+        finally:
+            typemeter_db.send_email = orig_send
 
 if __name__ == "__main__":
     unittest.main()

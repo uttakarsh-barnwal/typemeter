@@ -618,9 +618,385 @@ function completeTest() {
         fetch("/api/mistakes", {
             method: "POST",
             headers: {
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "X-CSRF-Token": window.csrfToken || ""
             },
             body: JSON.stringify(records)
         }).catch(err => console.error("Failed to post mistake stats:", err));
+    }
+}
+
+// --- Production-Grade Authentication UI Manager ---
+
+window.csrfToken = "";
+window.currentUser = null;
+let currentResetToken = "";
+
+// Auth DOM elements
+const authBtn = document.getElementById("auth-btn");
+const authUsername = document.getElementById("auth-username");
+const verifyBanner = document.getElementById("verify-banner");
+const resendVerifyBtn = document.getElementById("resend-verify-btn");
+const authModal = document.getElementById("auth-modal");
+const closeModalBtn = document.getElementById("close-modal-btn");
+const modalTitle = document.getElementById("modal-title");
+const authMessage = document.getElementById("auth-message");
+
+const loginForm = document.getElementById("login-form");
+const signupForm = document.getElementById("signup-form");
+const forgotForm = document.getElementById("forgot-form");
+const resetForm = document.getElementById("reset-form");
+const profileView = document.getElementById("profile-view");
+const oauthDivider = document.getElementById("oauth-divider");
+const googleBtn = document.getElementById("google-signin-btn");
+
+const goToSignup = document.getElementById("go-to-signup");
+const goToForgot = document.getElementById("go-to-forgot");
+const goToLogin = document.getElementById("go-to-login");
+const forgotToLogin = document.getElementById("forgot-to-login");
+const logoutBtn = document.getElementById("logout-btn");
+
+// Display status message in the Auth Modal
+function showAuthMessage(text, type = "error") {
+    if (!text) {
+        authMessage.style.display = "none";
+        return;
+    }
+    authMessage.textContent = text;
+    authMessage.className = `auth-message ${type}`;
+    authMessage.style.display = "block";
+}
+
+// Fetch current logged-in user profile from /auth/me
+async function loadSessionUser() {
+    try {
+        const res = await fetch("/auth/me");
+        const data = await res.json();
+        
+        if (data.authenticated) {
+            window.currentUser = data.user;
+            const name = data.user.display_name || data.user.email.split("@")[0];
+            authUsername.textContent = name;
+            authUsername.style.display = "inline";
+            
+            // Set values inside Profile View
+            document.getElementById("profile-email").textContent = data.user.email;
+            document.getElementById("profile-display-name").textContent = data.user.display_name || "Not set";
+            document.getElementById("profile-status").innerHTML = data.user.email_verified 
+                ? "<span style='color: #10b981; font-weight: bold;'><i class='fa-solid fa-circle-check'></i> Verified</span>"
+                : "<span style='color: #f59e0b; font-weight: bold;'><i class='fa-solid fa-circle-exclamation'></i> Unverified</span>";
+                
+            // Handle verification warning banner
+            if (!data.user.email_verified) {
+                verifyBanner.style.display = "flex";
+            } else {
+                verifyBanner.style.display = "none";
+            }
+        } else {
+            window.currentUser = null;
+            authUsername.style.display = "none";
+            verifyBanner.style.display = "none";
+        }
+    } catch (err) {
+        console.error("Failed to load authenticated user profile:", err);
+    }
+}
+
+// Load CSRF Token from server
+async function fetchCsrfToken() {
+    try {
+        const res = await fetch("/auth/csrf-token");
+        const data = await res.json();
+        window.csrfToken = data.csrf_token;
+    } catch (err) {
+        console.error("Failed to fetch CSRF token:", err);
+    }
+}
+
+// Initialize Auth GUI Controllers
+document.addEventListener("DOMContentLoaded", async () => {
+    await fetchCsrfToken();
+    await loadSessionUser();
+    
+    // Check URL parameters for triggers
+    const urlParams = new URLSearchParams(window.location.search);
+    
+    if (urlParams.has("verify_success")) {
+        alert(urlParams.get("verify_success"));
+        window.history.replaceState({}, document.title, window.location.pathname);
+        await loadSessionUser();
+    } else if (urlParams.has("verify_error")) {
+        alert(urlParams.get("verify_error"));
+        window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (urlParams.has("auth_success")) {
+        alert(urlParams.get("auth_success"));
+        window.history.replaceState({}, document.title, window.location.pathname);
+        await loadSessionUser();
+    } else if (urlParams.has("auth_error")) {
+        alert(urlParams.get("auth_error"));
+        window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (urlParams.has("reset_token")) {
+        currentResetToken = urlParams.get("reset_token");
+        window.history.replaceState({}, document.title, window.location.pathname);
+        
+        // Open Auth Modal and show Reset Password Form directly
+        showView("reset");
+        authModal.style.display = "flex";
+    }
+    
+    // Auth Button click behavior
+    if (authBtn) {
+        authBtn.addEventListener("click", () => {
+            showAuthMessage("", "");
+            if (window.currentUser) {
+                showView("profile");
+            } else {
+                showView("login");
+            }
+            authModal.style.display = "flex";
+        });
+    }
+    
+    if (closeModalBtn) {
+        closeModalBtn.addEventListener("click", () => {
+            authModal.style.display = "none";
+        });
+    }
+    
+    // Close modal on background click
+    window.addEventListener("click", (e) => {
+        if (e.target === authModal) {
+            authModal.style.display = "none";
+        }
+    });
+    
+    // Tab Switching Toggles
+    if (goToSignup) {
+        goToSignup.addEventListener("click", (e) => {
+            e.preventDefault();
+            showView("signup");
+        });
+    }
+    
+    if (goToLogin) {
+        goToLogin.addEventListener("click", (e) => {
+            e.preventDefault();
+            showView("login");
+        });
+    }
+    
+    if (goToForgot) {
+        goToForgot.addEventListener("click", (e) => {
+            e.preventDefault();
+            showView("forgot");
+        });
+    }
+    
+    if (forgotToLogin) {
+        forgotToLogin.addEventListener("click", (e) => {
+            e.preventDefault();
+            showView("login");
+        });
+    }
+    
+    // Form Submit Listeners
+    if (loginForm) {
+        loginForm.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            showAuthMessage("", "");
+            const email = document.getElementById("login-email").value;
+            const password = document.getElementById("login-password").value;
+            
+            try {
+                const res = await fetch("/auth/login", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRF-Token": window.csrfToken
+                    },
+                    body: JSON.stringify({ email, password })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    authModal.style.display = "none";
+                    loginForm.reset();
+                    await loadSessionUser();
+                    // Reload sentence to use personal mistake stats instead of anonymous ones
+                    resetTest();
+                } else {
+                    showAuthMessage(data.error);
+                }
+            } catch (err) {
+                showAuthMessage("Connection failed. Please try again.");
+            }
+        });
+    }
+    
+    if (signupForm) {
+        signupForm.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            showAuthMessage("", "");
+            const display_name = document.getElementById("signup-name").value;
+            const email = document.getElementById("signup-email").value;
+            const password = document.getElementById("signup-password").value;
+            
+            try {
+                const res = await fetch("/auth/signup", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRF-Token": window.csrfToken
+                    },
+                    body: JSON.stringify({ email, password, display_name })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    showAuthMessage(data.message, "success");
+                    signupForm.reset();
+                    setTimeout(() => showView("login"), 3000);
+                } else {
+                    showAuthMessage(data.error);
+                }
+            } catch (err) {
+                showAuthMessage("Registration failed. Please try again.");
+            }
+        });
+    }
+    
+    if (forgotForm) {
+        forgotForm.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            showAuthMessage("", "");
+            const email = document.getElementById("forgot-email").value;
+            
+            try {
+                const res = await fetch("/auth/forgot-password", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRF-Token": window.csrfToken
+                    },
+                    body: JSON.stringify({ email })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    showAuthMessage(data.message, "success");
+                    forgotForm.reset();
+                } else {
+                    showAuthMessage(data.error);
+                }
+            } catch (err) {
+                showAuthMessage("Request failed. Please try again.");
+            }
+        });
+    }
+    
+    if (resetForm) {
+        resetForm.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            showAuthMessage("", "");
+            const new_password = document.getElementById("reset-password").value;
+            
+            try {
+                const res = await fetch("/auth/reset-password", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRF-Token": window.csrfToken
+                    },
+                    body: JSON.stringify({ token: currentResetToken, new_password })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    showAuthMessage(data.message, "success");
+                    resetForm.reset();
+                    setTimeout(() => {
+                        authModal.style.display = "none";
+                        showView("login");
+                    }, 3000);
+                } else {
+                    showAuthMessage(data.error);
+                }
+            } catch (err) {
+                showAuthMessage("Reset request failed. Please try again.");
+            }
+        });
+    }
+    
+    if (logoutBtn) {
+        logoutBtn.addEventListener("click", async () => {
+            try {
+                await fetch("/auth/logout", {
+                    method: "POST",
+                    headers: {
+                        "X-CSRF-Token": window.csrfToken
+                    }
+                });
+                authModal.style.display = "none";
+                await loadSessionUser();
+                resetTest();
+            } catch (err) {
+                console.error("Logout failed:", err);
+            }
+        });
+    }
+    
+    if (resendVerifyBtn) {
+        resendVerifyBtn.addEventListener("click", async () => {
+            if (!window.currentUser) return;
+            try {
+                const res = await fetch("/auth/resend-verification", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRF-Token": window.csrfToken
+                    },
+                    body: JSON.stringify({ email: window.currentUser.email })
+                });
+                const data = await res.json();
+                alert(data.message || data.error);
+            } catch (err) {
+                alert("Request failed. Please check connection.");
+            }
+        });
+    }
+    
+    if (googleBtn) {
+        googleBtn.addEventListener("click", () => {
+            // Redirect to backend endpoint initiating Google consent redirection
+            window.location.href = "/auth/google";
+        });
+    }
+});
+
+// Helper switcher to toggle active modal views
+function showView(view) {
+    loginForm.style.display = "none";
+    signupForm.style.display = "none";
+    forgotForm.style.display = "none";
+    resetForm.style.display = "none";
+    profileView.style.display = "none";
+    oauthDivider.style.display = "none";
+    googleBtn.style.display = "none";
+    
+    if (view === "login") {
+        modalTitle.textContent = "Sign In";
+        loginForm.style.display = "flex";
+        oauthDivider.style.display = "block";
+        googleBtn.style.display = "flex";
+    } else if (view === "signup") {
+        modalTitle.textContent = "Create Account";
+        signupForm.style.display = "flex";
+        oauthDivider.style.display = "block";
+        googleBtn.style.display = "flex";
+    } else if (view === "forgot") {
+        modalTitle.textContent = "Forgot Password";
+        forgotForm.style.display = "flex";
+    } else if (view === "reset") {
+        modalTitle.textContent = "Reset Password";
+        resetForm.style.display = "flex";
+    } else if (view === "profile") {
+        modalTitle.textContent = "User Profile";
+        profileView.style.display = "block";
     }
 }

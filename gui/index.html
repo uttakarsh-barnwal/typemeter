@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TypeMeter | Modern Typing Speed Test</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -13,14 +14,23 @@
             <span>TypeMeter</span>
         </div>
         <div class="nav-controls">
+            <button id="auth-btn" class="btn-icon" title="Sign In / Profile">
+                <i class="fa-solid fa-user"></i>
+                <span id="auth-username" style="display: none; margin-left: 6px; font-size: 14px; font-weight: 500;">Guest</span>
+            </button>
             <button id="theme-toggle" class="btn-icon" title="Toggle Theme">
                 <i class="fa-solid fa-moon"></i>
             </button>
-            <a href="https://github." class="btn-icon" target="_blank" title="GitHub Repository" id="github-link">
+            <a href="https://github.com" class="btn-icon" target="_blank" title="GitHub Repository" id="github-link">
                 <i class="fa-brands fa-github"></i>
             </a>
         </div>
     </header>
+
+    <div id="verify-banner" class="banner" style="display: none;">
+        <span class="banner-text"><i class="fa-solid fa-circle-exclamation" style="margin-right: 8px;"></i> Please check your email to verify your account.</span>
+        <button id="resend-verify-btn" class="btn-action-small">Resend Email</button>
+    </div>
 
     <main>
         <!-- Settings Panel -->
@@ -114,6 +124,111 @@
     <footer>
         <p>TypeMeter local GUI. Made with <i class="fa-solid fa-heart" style="color: var(--incorrect);"></i> for speed typists.</p>
     </footer>
+
+    <!-- Auth Modal -->
+    <div id="auth-modal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modal-title">Sign In</h3>
+                <button class="close-btn" id="close-modal-btn">&times;</button>
+            </div>
+            
+            <div id="auth-message" class="auth-message" style="display: none;"></div>
+            
+            <!-- Login View -->
+            <form id="login-form" class="auth-form">
+                <div class="form-group">
+                    <label for="login-email">Email Address</label>
+                    <input type="email" id="login-email" required placeholder="name@example.com">
+                </div>
+                <div class="form-group">
+                    <label for="login-password">Password</label>
+                    <input type="password" id="login-password" required placeholder="Enter your password">
+                </div>
+                <button type="submit" class="btn-restart" style="width: 100%; margin-top: 15px;">Sign In</button>
+                <div class="auth-links">
+                    <a href="#" id="go-to-signup">Create an Account</a>
+                    <a href="#" id="go-to-forgot">Forgot Password?</a>
+                </div>
+            </form>
+            
+            <!-- Signup View -->
+            <form id="signup-form" class="auth-form" style="display: none;">
+                <div class="form-group">
+                    <label for="signup-name">Display Name (Optional)</label>
+                    <input type="text" id="signup-name" placeholder="John Doe">
+                </div>
+                <div class="form-group">
+                    <label for="signup-email">Email Address</label>
+                    <input type="email" id="signup-email" required placeholder="name@example.com">
+                </div>
+                <div class="form-group">
+                    <label for="signup-password">Password</label>
+                    <input type="password" id="signup-password" required placeholder="Min 8 characters, 1 letter & 1 number">
+                </div>
+                <button type="submit" class="btn-restart" style="width: 100%; margin-top: 15px;">Register</button>
+                <div class="auth-links">
+                    <a href="#" id="go-to-login">Already have an account? Sign In</a>
+                </div>
+            </form>
+            
+            <!-- Forgot Password View -->
+            <form id="forgot-form" class="auth-form" style="display: none;">
+                <p class="auth-description">Enter your email address and we will send you a password reset link.</p>
+                <div class="form-group">
+                    <label for="forgot-email">Email Address</label>
+                    <input type="email" id="forgot-email" required placeholder="name@example.com">
+                </div>
+                <button type="submit" class="btn-restart" style="width: 100%; margin-top: 15px;">Send Reset Link</button>
+                <div class="auth-links">
+                    <a href="#" id="forgot-to-login">Back to Sign In</a>
+                </div>
+            </form>
+            
+            <!-- Reset Password View -->
+            <form id="reset-form" class="auth-form" style="display: none;">
+                <p class="auth-description">Enter your new password below.</p>
+                <div class="form-group">
+                    <label for="reset-password">New Password</label>
+                    <input type="password" id="reset-password" required placeholder="Min 8 characters, 1 letter & 1 number">
+                </div>
+                <button type="submit" class="btn-restart" style="width: 100%; margin-top: 15px;">Update Password</button>
+            </form>
+            
+            <!-- Profile View -->
+            <div id="profile-view" class="auth-form" style="display: none;">
+                <div class="profile-info">
+                    <div class="profile-row">
+                        <span class="profile-label">Email:</span>
+                        <span id="profile-email" class="profile-value"></span>
+                    </div>
+                    <div class="profile-row">
+                        <span class="profile-label">Name:</span>
+                        <span id="profile-display-name" class="profile-value"></span>
+                    </div>
+                    <div class="profile-row">
+                        <span class="profile-label">Status:</span>
+                        <span id="profile-status" class="profile-value"></span>
+                    </div>
+                </div>
+                <button id="logout-btn" class="btn-restart" style="width: 100%; margin-top: 20px; background: var(--incorrect-bg); color: var(--incorrect);">Log Out</button>
+            </div>
+            
+            <!-- OAuth Options -->
+            <div id="oauth-divider" class="oauth-divider">
+                <span>or</span>
+            </div>
+            <button id="google-signin-btn" class="btn-google">
+                <svg viewBox="0 0 48 48" width="18px" height="18px" style="margin-right: 10px; display: inline-block; vertical-align: middle;">
+                    <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                    <path fill="#4285F4" d="M46.5 24c0-1.63-.15-3.2-.43-4.75H24v9h12.75c-.55 2.87-2.17 5.31-4.61 6.94l7.2 5.58C43.5 35.75 46.5 30.3 46.5 24z"/>
+                    <path fill="#FBBC05" d="M10.54 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.98-6.19z"/>
+                    <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.2-5.58c-2 1.34-4.55 2.14-7.19 2.14-6.26 0-11.57-4.22-13.46-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+                </svg>
+                Sign in with Google
+            </button>
+        </div>
+    </div>
 
     <!-- Scripts -->
     <script src="random-words.min.js"></script>

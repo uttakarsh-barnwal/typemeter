@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-import http.server
-import socketserver
+import os
+import re
+import sys
+import uuid
+import hmac
+import socket
+import secrets
+import datetime
 import webbrowser
 import threading
-import os
-import sys
-import socket
-from urllib.parse import urlparse, parse_qs
-import json
+from urllib.parse import urlparse
+from flask import Flask, request, jsonify, session, make_response, send_from_directory
+from dotenv import load_dotenv
 import typemeter_db
 
 # Port configurations
@@ -25,127 +29,181 @@ def get_free_port(start_port):
                 continue
     raise OSError("Could not find an open port.")
 
-class QuietHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
-    """A SimpleHTTPRequestHandler that suppresses standard logger output, handles session cookies, and implements the API endpoints."""
-    def log_message(self, format, *args):
-        # Disable logging for static files to keep standard output tidy.
-        pass
-
-    def get_db(self):
-        return typemeter_db.get_db("typemeter.db")
-
-    def resolve_identity_id(self):
-        if hasattr(self, '_resolved_identity_id'):
-            return self._resolved_identity_id
+def init_dotenv():
+    """Initializes .env file from .env.example if missing, generating a secure SECRET_KEY."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    env_path = os.path.join(script_dir, ".env")
+    env_example_path = os.path.join(script_dir, ".env.example")
+    
+    if not os.path.exists(env_path) and os.path.exists(env_example_path):
+        print("[*] First-time setup: generating .env file with secure secret key...")
+        with open(env_example_path, "r") as f:
+            content = f.read()
+        secure_key = secrets.token_hex(32)
+        content = content.replace("replace_this_with_a_secure_random_key_of_at_least_32_chars", secure_key)
+        with open(env_path, "w") as f:
+            f.write(content)
             
-        cookie_header = self.headers.get('Cookie', '')
-        cookies = {}
-        for item in cookie_header.split(';'):
-            item = item.strip()
-            if '=' in item:
-                k, v = item.split('=', 1)
-                cookies[k] = v
-                
-        if 'identity_id' in cookies:
-            self._resolved_identity_id = cookies['identity_id']
-            self._cookie_already_present = True
-        else:
-            import uuid
-            self._resolved_identity_id = str(uuid.uuid4())
-            self._cookie_already_present = False
-            
-        return self._resolved_identity_id
+    load_dotenv(env_path)
 
-    def end_headers(self):
-        identity_id = self.resolve_identity_id()
-        if not getattr(self, '_cookie_already_present', False):
-            self.send_header('Set-Cookie', f"identity_id={identity_id}; Max-Age=31536000; HttpOnly; Path=/")
-        super().end_headers()
+def create_app():
+    """Application factory for TypeMeter Flask GUI Server."""
+    init_dotenv()
+    
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    gui_dir = os.path.join(script_dir, "gui")
+    
+    app = Flask(__name__, static_folder=gui_dir, static_url_path="")
+    
+    # Configure Flask Session signing
+    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+    
+    # Configure cookie parameters
+    is_prod = (os.environ.get("ENV") == "production")
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SECURE"] = is_prod
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    
+    # Register blueprints
+    from auth import auth_bp, init_oauth
+    app.register_blueprint(auth_bp, url_prefix="/auth")
+    init_oauth(app)
+    
+    # Initialize DB schemas
+    db_path = os.path.join(script_dir, "typemeter.db")
+    app.config["DATABASE"] = db_path
+    db = typemeter_db.get_db(db_path)
+    try:
+        typemeter_db.cleanup_sessions(db)
+    finally:
+        db.close()
+        
+    # --- Request-Bound Database Connection ---
+    @app.before_request
+    def open_db_connection():
+        from flask import g
+        g.db = typemeter_db.get_db(app.config["DATABASE"])
+        
+    @app.teardown_appcontext
+    def close_db_connection(exception):
+        from flask import g
+        db = getattr(g, 'db', None)
+        if db is not None:
+            db.close()
 
-    def do_GET(self):
-        parsed_path = urlparse(self.path)
-        if parsed_path.path == '/api/words':
-            params = parse_qs(parsed_path.query)
-            difficulty = params.get('difficulty', ['easy'])[0]
-            count_str = params.get('count', ['25'])[0]
-            try:
-                count = int(count_str)
-            except ValueError:
-                count = 25
-                
-            identity_id = self.resolve_identity_id()
+    # --- CSRF Protection Middleware ---
+    @app.before_request
+    def csrf_protect():
+        # Ensure session has a CSRF token
+        if "csrf_token" not in session:
+            session["csrf_token"] = secrets.token_hex(16)
             
-            # Select words using mistake weightings
-            conn = self.get_db()
-            try:
-                words = typemeter_db.backend_select_words(conn, difficulty, count, identity_id)
-            finally:
-                conn.close()
-                
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(words).encode('utf-8'))
-        else:
-            super().do_GET()
-
-    def do_POST(self):
-        parsed_path = urlparse(self.path)
-        if parsed_path.path == '/api/mistakes':
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_data = self.rfile.read(content_length)
-            
-            try:
-                records = json.loads(post_data.decode('utf-8'))
-            except Exception as e:
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(b"Invalid JSON")
+        # Validate state-changing operations
+        if request.method in ["POST", "PUT", "DELETE", "PATCH"]:
+            # Exclude Google callback since it handles its own OAuth state verification
+            if request.path == "/auth/google/callback":
                 return
                 
-            identity_id = self.resolve_identity_id()
+            client_csrf = request.headers.get("X-CSRF-Token")
+            server_csrf = session.get("csrf_token")
             
-            conn = self.get_db()
-            try:
-                typemeter_db.ingest_mistakes(conn, identity_id, records)
-            finally:
-                conn.close()
-                
-            self.send_response(204)
-            self.end_headers()
-        else:
-            self.send_response(404)
-            self.end_headers()
+            if not client_csrf or not server_csrf or not hmac.compare_digest(client_csrf, server_csrf):
+                return jsonify({"error": "CSRF token missing or invalid."}), 403
 
-def start_server(port, directory):
-    """Runs a local socket server on the given port serving files in directory."""
-    # Ensure correct working directory when serving
-    class Handler(QuietHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=directory, **kwargs)
+    # --- Identity Resolution Logic ---
+    def resolve_identity_id():
+        """
+        Resolves identity: checks for a logged-in session first,
+        falling back to the anonymous cookie. Returns (identity_id, set_cookie_needed).
+        """
+        from flask import g
+        db = g.db
+        sess_id = session.get("session_id")
+        
+        # 1. Attempt session lookup
+        if sess_id:
+            sess = typemeter_db.get_session(db, sess_id)
+            if sess:
+                typemeter_db.touch_session(db, sess_id)
+                return str(sess["user_id"]), False
+                
+        # 2. Fall back to anonymous cookie lookup
+        anon_cookie = request.cookies.get("identity_id")
+        if anon_cookie:
+            return anon_cookie, False
             
-    # Allow port reuse to avoid binding issues immediately after restarts
-    socketserver.TCPServer.allow_reuse_address = True
-    try:
-        with socketserver.TCPServer(("127.0.0.1", port), Handler) as httpd:
-            print(f"[*] Local HTTP Server started successfully.")
-            httpd.serve_forever()
-    except Exception as e:
-        print(f"[!] Server Error: {e}", file=sys.stderr)
+        # 3. Generate new anonymous identity
+        new_uuid = str(uuid.uuid4())
+        return new_uuid, True
+
+    # --- API Core Endpoints ---
+    @app.route("/auth/csrf-token", methods=["GET"])
+    def get_csrf_token():
+        """Returns the current session's CSRF token."""
+        if "csrf_token" not in session:
+            session["csrf_token"] = secrets.token_hex(16)
+        return jsonify({"csrf_token": session["csrf_token"]})
+
+    @app.route("/api/words", methods=["GET"])
+    def get_words():
+        difficulty = request.args.get("difficulty", "easy")
+        count_str = request.args.get("count", "25")
+        try:
+            count = int(count_str)
+        except ValueError:
+            count = 25
+            
+        identity_id, set_cookie = resolve_identity_id()
+        from flask import g
+        db = g.db
+        words = typemeter_db.backend_select_words(db, difficulty, count, identity_id)
+        
+        response = make_response(jsonify(words))
+        if set_cookie:
+            response.set_cookie("identity_id", identity_id, max_age=31536000, httponly=True, path="/")
+        return response
+
+    @app.route("/api/mistakes", methods=["POST"])
+    def post_mistakes():
+        records = request.get_json() or []
+        identity_id, set_cookie = resolve_identity_id()
+        
+        from flask import g
+        db = g.db
+        typemeter_db.ingest_mistakes(db, identity_id, records)
+        
+        response = make_response("", 204)
+        if set_cookie:
+            response.set_cookie("identity_id", identity_id, max_age=31536000, httponly=True, path="/")
+        return response
+
+    # --- Static Files Routing ---
+    @app.route("/")
+    @app.route("/index.html")
+    def gui_index():
+        return send_from_directory(gui_dir, "index.html")
+        
+    @app.route("/<path:path>")
+    def gui_static(path):
+        return send_from_directory(gui_dir, path)
+        
+    return app
+
+def start_dev_server(app, port):
+    """Runs the Flask application in dev mode on localhost."""
+    # Suppress standard logging for static files
+    import logging
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.WARNING)
+    
+    app.run(host="127.0.0.1", port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
-    # Locate GUI folder
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Verify that the gui folder exists
-    gui_dir = os.path.join(script_dir, "gui")
-    if not os.path.isdir(gui_dir):
-        print(f"[!] Error: Could not locate 'gui' subdirectory in {script_dir}", file=sys.stderr)
-        sys.exit(1)
-
     print("==================================================")
     print("           TypeMeter Local GUI Server             ")
     print("==================================================")
+    
+    app = create_app()
     
     try:
         port = get_free_port(START_PORT)
@@ -155,22 +213,20 @@ if __name__ == "__main__":
         
     url = f"http://127.0.0.1:{port}/index.html"
     
-    # Start the server in a separate background daemon thread
-    server_thread = threading.Thread(target=start_server, args=(port, gui_dir), daemon=True)
+    # Start Flask dev server in a background thread
+    server_thread = threading.Thread(target=start_dev_server, args=(app, port), daemon=True)
     server_thread.start()
     
-    print(f"[*] Serving GUI directory at: {gui_dir}")
+    print(f"[*] Served via Flask application factory.")
     print(f"[*] App URL: {url}")
     print("[*] Launching system default browser...")
     
-    # Launch default web browser targeting our local port server
     webbrowser.open(url)
     
     print("\n--------------------------------------------------")
     print(" Press Ctrl+C in this terminal to stop the server.")
     print("--------------------------------------------------\n")
     
-    # Keep main thread alive
     try:
         while True:
             import time

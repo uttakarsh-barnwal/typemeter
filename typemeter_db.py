@@ -5,6 +5,11 @@ import ast
 import math
 import random
 import datetime
+import bcrypt
+import hashlib
+import secrets
+import smtplib
+from email.mime.text import MIMEText
 
 # --- Configuration Constants ---
 HALF_LIFE_DAYS = 14.0
@@ -82,6 +87,69 @@ def get_db(db_path="typemeter.db"):
             created_at TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT,
+            auth_provider TEXT NOT NULL,
+            google_id TEXT UNIQUE,
+            email_verified INTEGER DEFAULT 0,
+            display_name TEXT,
+            failed_login_attempts INTEGER DEFAULT 0,
+            lockout_until TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS email_verification_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token_hash TEXT UNIQUE NOT NULL,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token_hash TEXT UNIQUE NOT NULL,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            session_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ip_rate_limits (
+            key TEXT NOT NULL,
+            action TEXT NOT NULL,
+            timestamp TEXT NOT NULL
+        )
+    """)
+    
+    # Create indexes
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_email_tokens_hash ON email_verification_tokens(token_hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reset_tokens_hash ON password_reset_tokens(token_hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_limits_key_timestamp ON ip_rate_limits(key, timestamp)")
+    
     conn.commit()
     return conn
 
@@ -415,3 +483,179 @@ def backend_select_words(conn, difficulty, count, identity_id):
         random.shuffle(sentence_list)
         
     return sentence_list
+
+
+# --- Password and Security Helper Functions ---
+
+def hash_password(password, cost=12):
+    """Securely hashes a plaintext password using bcrypt and cost factor."""
+    salt = bcrypt.gensalt(rounds=cost)
+    return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+
+def verify_password(password, password_hash):
+    """Verifies a plaintext password matches its bcrypt hash."""
+    if not password or not password_hash:
+        return False
+    try:
+        return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+    except Exception:
+        return False
+
+def hash_token(token):
+    """Hashes a raw token with SHA-256 to prevent leakage in case of database dumps."""
+    return hashlib.sha256(token.encode('utf-8')).hexdigest()
+
+def check_rate_limit(conn, key, action, limit, window_seconds):
+    """
+    Lightweight, persistent database-backed rate limiter.
+    Returns True if allowed, False if blocked.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cutoff = (now - datetime.timedelta(seconds=window_seconds)).isoformat()
+    cursor = conn.cursor()
+    
+    # Delete expired rate-limit entries
+    cursor.execute("DELETE FROM ip_rate_limits WHERE timestamp < ?", (cutoff,))
+    
+    # Count requests
+    cursor.execute(
+        "SELECT COUNT(*) FROM ip_rate_limits WHERE key = ? AND action = ? AND timestamp >= ?",
+        (key, action, cutoff)
+    )
+    count = cursor.fetchone()[0]
+    
+    if count >= limit:
+        return False
+        
+    # Ingest current request timestamp
+    cursor.execute(
+        "INSERT INTO ip_rate_limits (key, action, timestamp) VALUES (?, ?, ?)",
+        (key, action, now.isoformat())
+    )
+    conn.commit()
+    return True
+
+def send_email(to_email, subject, body):
+    """
+    Sends an email using configured SMTP settings, or fallback to logging.
+    Loads host/port/credentials dynamically to support zero-dependency setups.
+    """
+    host = os.environ.get("SMTP_HOST")
+    port_str = os.environ.get("SMTP_PORT", "587")
+    user = os.environ.get("SMTP_USER")
+    password = os.environ.get("SMTP_PASS")
+    sender = os.environ.get("SMTP_FROM", "noreply@typemeter.local")
+    
+    print(f"\n==================================================")
+    print(f"📧 EMAIL SENT TO: {to_email}")
+    print(f"Subject: {subject}")
+    print(f"Content:\n{body}")
+    print(f"==================================================\n")
+    
+    if not host or not user or not password:
+        # Fallback to stdout log (standard for local dev/test environment)
+        return True
+        
+    try:
+        port = int(port_str)
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = sender
+        msg["To"] = to_email
+        
+        with smtplib.SMTP(host, port) as server:
+            server.starttls()
+            server.login(user, password)
+            server.sendmail(sender, [to_email], msg.as_string())
+        return True
+    except Exception as e:
+        print(f"[!] SMTP email delivery failed: {e}")
+        return False
+
+# --- Session Manager Helpers ---
+
+def create_session(conn, user_id):
+    """Creates a new session for a user, enforcing session fixation protection."""
+    session_id = secrets.token_urlsafe(32)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Absolute expiry is 30 days
+    expires_at = (now + datetime.timedelta(days=30)).isoformat()
+    
+    conn.execute(
+        "INSERT INTO sessions (session_id, user_id, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+        (session_id, user_id, now.isoformat(), now.isoformat(), expires_at)
+    )
+    conn.commit()
+    return session_id
+
+def get_session(conn, session_id):
+    """
+    Retrieves the session from database, enforcing idle (7d) and absolute (30d) timeouts.
+    Returns session dict/Row if valid, otherwise None.
+    """
+    if not session_id:
+        return None
+        
+    row = conn.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+    if not row:
+        return None
+        
+    now = datetime.datetime.now(datetime.timezone.utc)
+    
+    # Check absolute expiry (30 days)
+    expires_at = datetime.datetime.fromisoformat(row["expires_at"])
+    if now.timestamp() > expires_at.timestamp():
+        delete_session(conn, session_id)
+        return None
+        
+    # Check idle timeout (7 days)
+    last_seen_at = datetime.datetime.fromisoformat(row["last_seen_at"])
+    if now.timestamp() - last_seen_at.timestamp() > 7 * 24 * 3600:
+        delete_session(conn, session_id)
+        return None
+        
+    return row
+
+def touch_session(conn, session_id):
+    """Touches session to update last_seen_at, throttled to once per 5 minutes."""
+    if not session_id:
+        return
+        
+    row = conn.execute("SELECT last_seen_at FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+    if not row:
+        return
+        
+    now = datetime.datetime.now(datetime.timezone.utc)
+    last_seen = datetime.datetime.fromisoformat(row["last_seen_at"])
+    
+    # Only touch if older than 5 minutes to limit DB writes
+    if now.timestamp() - last_seen.timestamp() > 300:
+        conn.execute(
+            "UPDATE sessions SET last_seen_at = ? WHERE session_id = ?",
+            (now.isoformat(), session_id)
+        )
+        conn.commit()
+
+def delete_session(conn, session_id):
+    """Permanently invalidates and deletes a session."""
+    if session_id:
+        conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+        conn.commit()
+
+def invalidate_user_sessions(conn, user_id, keep_session_id=None):
+    """Invalidates all sessions for a user (e.g. on password reset/change)."""
+    if keep_session_id:
+        conn.execute("DELETE FROM sessions WHERE user_id = ? AND session_id != ?", (user_id, keep_session_id))
+    else:
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    conn.commit()
+
+def cleanup_sessions(conn):
+    """Periodically sweeps expired session rows."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Delete absolute expired sessions
+    conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now.isoformat(),))
+    # Delete idle expired sessions (older than 7 days)
+    idle_cutoff = (now - datetime.timedelta(days=7)).isoformat()
+    conn.execute("DELETE FROM sessions WHERE last_seen_at < ?", (idle_cutoff,))
+    conn.commit()
