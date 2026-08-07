@@ -10,10 +10,16 @@
 <body>
     <header>
         <div class="logo">
-            <i class="fa-solid fa-gauge-high"></i>
-            <span>TypeMeter</span>
+            <a href="index.html" style="text-decoration: none; color: inherit; display: flex; align-items: center; gap: 8px;">
+                <i class="fa-solid fa-gauge-high"></i>
+                <span>TypeMeter</span>
+            </a>
         </div>
         <div class="nav-controls">
+            <a href="history.html" id="history-nav-link" class="btn-nav" title="Session History & Personal Bests" style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 8px; text-decoration: none; color: var(--text-color); font-size: 14px; font-weight: 500; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); transition: all 0.2s;">
+                <i class="fa-solid fa-clock-rotate-left"></i>
+                <span>History</span>
+            </a>
             <button id="auth-btn" class="btn-icon" title="Sign In / Profile">
                 <i class="fa-solid fa-user"></i>
                 <span id="auth-username" style="display: none; margin-left: 6px; font-size: 14px; font-weight: 500;">Guest</span>

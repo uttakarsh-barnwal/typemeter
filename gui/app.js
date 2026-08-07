@@ -624,6 +624,25 @@ function completeTest() {
             body: JSON.stringify(records)
         }).catch(err => console.error("Failed to post mistake stats:", err));
     }
+
+    // Save full session metrics for personal history tracking
+    const sessionData = {
+        wpm: currentWpm,
+        raw_wpm: currentRawWpm,
+        accuracy: currentAccuracy,
+        mistakes_count: totalMistakes,
+        total_chars: totalTypedChars,
+        time_seconds: testTimeSeconds,
+        difficulty: currentDifficulty
+    };
+    fetch("/api/save_session", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": window.csrfToken || ""
+        },
+        body: JSON.stringify(sessionData)
+    }).catch(err => console.error("Failed to save session performance:", err));
 }
 
 // --- Production-Grade Authentication UI Manager ---

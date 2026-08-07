@@ -177,11 +177,76 @@ def create_app():
             response.set_cookie("identity_id", identity_id, max_age=31536000, httponly=True, path="/")
         return response
 
+    # --- Authentication Middleware Decorator ---
+    from functools import wraps
+    def login_required(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            from flask import g
+            sess_id = session.get("session_id")
+            if not sess_id:
+                return jsonify({"error": "Authentication required."}), 401
+            sess = typemeter_db.get_session(g.db, sess_id)
+            if not sess:
+                return jsonify({"error": "Session expired or invalid."}), 401
+            g.current_user_id = sess["user_id"]
+            return f(*args, **kwargs)
+        return decorated_function
+
+    @app.route("/api/save_session", methods=["POST"])
+    def post_save_session():
+        from flask import g
+        data = request.get_json() or {}
+        identity_id, set_cookie = resolve_identity_id()
+        
+        sess_id = session.get("session_id")
+        user_id = None
+        if sess_id:
+            sess = typemeter_db.get_session(g.db, sess_id)
+            if sess:
+                user_id = sess["user_id"]
+                
+        rec_id = typemeter_db.save_typing_session(g.db, identity_id, user_id, data)
+        response = make_response(jsonify({"status": "success", "session_id": rec_id}), 201)
+        if set_cookie:
+            response.set_cookie("identity_id", identity_id, max_age=31536000, httponly=True, path="/")
+        return response
+
+    @app.route("/api/history", methods=["GET"])
+    @login_required
+    def get_history():
+        from flask import g
+        try:
+            limit = min(int(request.args.get("limit", 50)), 100)
+            offset = max(int(request.args.get("offset", 0)), 0)
+        except ValueError:
+            limit, offset = 50, 0
+            
+        sessions, total_count = typemeter_db.get_user_history(g.db, g.current_user_id, limit=limit, offset=offset)
+        return jsonify({
+            "sessions": sessions,
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset
+        })
+
+    @app.route("/api/records", methods=["GET"])
+    @login_required
+    def get_records():
+        from flask import g
+        records = typemeter_db.get_user_records(g.db, g.current_user_id)
+        return jsonify(records)
+
     # --- Static Files Routing ---
     @app.route("/")
     @app.route("/index.html")
     def gui_index():
         return send_from_directory(gui_dir, "index.html")
+
+    @app.route("/history")
+    @app.route("/history.html")
+    def gui_history():
+        return send_from_directory(gui_dir, "history.html")
         
     @app.route("/<path:path>")
     def gui_static(path):

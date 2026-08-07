@@ -1,12 +1,71 @@
-instructions.md
+# ==========================================
+# TypeMeter Git Ignore Configuration
+# ==========================================
 
-# SQLite database files
+# ------------------------------------------
+# 1. Vulnerable & Sensitive Environment Secrets
+# ------------------------------------------
+.env
+.env.local
+.env.*.local
+.env.development
+.env.test
+.env.production
+*.pem
+*.key
+*.pfx
+*.crt
+*.secret
+
+# ------------------------------------------
+# 2. SQLite Databases & WAL/SHM Log Files
+# ------------------------------------------
 *.db
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+typemeter.db
+test_*.db*
 
-# Python cache
+# ------------------------------------------
+# 3. Python Bytecode & Runtime Caches
+# ------------------------------------------
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ------------------------------------------
+# 4. Virtual Environments
+# ------------------------------------------
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ------------------------------------------
+# 5. IDE & OS Artifacts
+# ------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ------------------------------------------
+# 6. Internal Notes & Runtime Logs
+# ------------------------------------------
+instructions.md
+*.log

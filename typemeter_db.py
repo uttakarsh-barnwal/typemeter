@@ -141,6 +141,21 @@ def get_db(db_path="typemeter.db"):
             timestamp TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS typing_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            identity_id TEXT NOT NULL,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            wpm REAL NOT NULL,
+            raw_wpm REAL NOT NULL,
+            accuracy REAL NOT NULL,
+            mistakes_count INTEGER DEFAULT 0,
+            total_chars INTEGER DEFAULT 0,
+            time_seconds REAL DEFAULT 0.0,
+            difficulty TEXT NOT NULL DEFAULT 'easy',
+            created_at TEXT NOT NULL
+        )
+    """)
     
     # Create indexes
     conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
@@ -149,6 +164,8 @@ def get_db(db_path="typemeter.db"):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_reset_tokens_hash ON password_reset_tokens(token_hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_limits_key_timestamp ON ip_rate_limits(key, timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_typing_sessions_user_id ON typing_sessions(user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_typing_sessions_identity ON typing_sessions(identity_id)")
     
     conn.commit()
     return conn
@@ -659,3 +676,164 @@ def cleanup_sessions(conn):
     idle_cutoff = (now - datetime.timedelta(days=7)).isoformat()
     conn.execute("DELETE FROM sessions WHERE last_seen_at < ?", (idle_cutoff,))
     conn.commit()
+
+# --- Session History & Anonymous Migration Helpers ---
+
+def save_typing_session(conn, identity_id, user_id, data):
+    """Saves a completed typing session record."""
+    wpm = float(data.get("wpm", 0.0))
+    raw_wpm = float(data.get("raw_wpm", 0.0))
+    accuracy = float(data.get("accuracy", 0.0))
+    mistakes_count = int(data.get("mistakes_count", 0))
+    total_chars = int(data.get("total_chars", 0))
+    time_seconds = float(data.get("time_seconds", 0.0))
+    difficulty = str(data.get("difficulty", "easy")).strip()
+    created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO typing_sessions (identity_id, user_id, wpm, raw_wpm, accuracy, mistakes_count, total_chars, time_seconds, difficulty, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (identity_id, user_id, wpm, raw_wpm, accuracy, mistakes_count, total_chars, time_seconds, difficulty, created_at))
+    conn.commit()
+    return cursor.lastrowid
+
+def get_user_history(conn, user_id, limit=50, offset=0):
+    """Retrieves paginated typing session history for a logged-in user."""
+    cursor = conn.cursor()
+    count_row = cursor.execute("SELECT COUNT(*) FROM typing_sessions WHERE user_id = ?", (user_id,)).fetchone()
+    total_count = count_row[0] if count_row else 0
+    
+    rows = cursor.execute("""
+        SELECT id, wpm, raw_wpm, accuracy, mistakes_count, total_chars, time_seconds, difficulty, created_at
+        FROM typing_sessions
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?
+    """, (user_id, limit, offset)).fetchall()
+    
+    sessions = [dict(row) for row in rows]
+    return sessions, total_count
+
+def get_user_records(conn, user_id):
+    """Computes personal bests, overall statistics, and trend records for a logged-in user."""
+    cursor = conn.cursor()
+    
+    stats_row = cursor.execute("""
+        SELECT 
+            MAX(wpm) as peak_wpm,
+            MAX(accuracy) as peak_accuracy,
+            COUNT(*) as total_sessions,
+            SUM(time_seconds) as total_time_seconds,
+            AVG(wpm) as avg_wpm,
+            AVG(accuracy) as avg_accuracy,
+            SUM(total_chars) as total_chars,
+            SUM(mistakes_count) as total_mistakes
+        FROM typing_sessions
+        WHERE user_id = ?
+    """, (user_id,)).fetchone()
+    
+    trend_rows = cursor.execute("""
+        SELECT id, wpm, raw_wpm, accuracy, created_at
+        FROM typing_sessions
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT 30
+    """, (user_id,)).fetchall()
+    
+    trends = [dict(r) for r in reversed(trend_rows)]
+    
+    if not stats_row or not stats_row["total_sessions"]:
+        return {
+            "peak_wpm": 0.0,
+            "peak_accuracy": 0.0,
+            "total_sessions": 0,
+            "total_time_seconds": 0.0,
+            "avg_wpm": 0.0,
+            "avg_accuracy": 0.0,
+            "total_chars": 0,
+            "total_mistakes": 0,
+            "trends": []
+        }
+        
+    return {
+        "peak_wpm": round(stats_row["peak_wpm"] or 0.0, 1),
+        "peak_accuracy": round(stats_row["peak_accuracy"] or 0.0, 1),
+        "total_sessions": stats_row["total_sessions"] or 0,
+        "total_time_seconds": round(stats_row["total_time_seconds"] or 0.0, 1),
+        "avg_wpm": round(stats_row["avg_wpm"] or 0.0, 1),
+        "avg_accuracy": round(stats_row["avg_accuracy"] or 0.0, 1),
+        "total_chars": stats_row["total_chars"] or 0,
+        "total_mistakes": stats_row["total_mistakes"] or 0,
+        "trends": trends
+    }
+
+def migrate_anonymous_data(conn, anon_identity_id, user_id):
+    """
+    Attaches any existing anonymous session history and merges n-gram mistake stats 
+    from an anonymous identity_id cookie to a newly authenticated user account.
+    """
+    if not anon_identity_id or not user_id:
+        return
+        
+    target_identity_id = str(user_id)
+    if anon_identity_id == target_identity_id:
+        return
+        
+    cursor = conn.cursor()
+    
+    # 1. Update typing_sessions
+    cursor.execute("""
+        UPDATE typing_sessions 
+        SET user_id = ?, identity_id = ? 
+        WHERE identity_id = ?
+    """, (user_id, target_identity_id, anon_identity_id))
+    
+    # 2. Update mistake_events
+    cursor.execute("""
+        UPDATE mistake_events 
+        SET identity_id = ? 
+        WHERE identity_id = ?
+    """, (target_identity_id, anon_identity_id))
+    
+    # 3. Merge unigram_stats
+    rows = cursor.execute("SELECT char, mistakes, total, last_updated FROM unigram_stats WHERE identity_id = ?", (anon_identity_id,)).fetchall()
+    for r in rows:
+        cursor.execute("""
+            INSERT INTO unigram_stats (identity_id, char, mistakes, total, last_updated)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(identity_id, char) DO UPDATE SET
+                mistakes = unigram_stats.mistakes + excluded.mistakes,
+                total = unigram_stats.total + excluded.total,
+                last_updated = CASE WHEN excluded.last_updated > unigram_stats.last_updated THEN excluded.last_updated ELSE unigram_stats.last_updated END
+        """, (target_identity_id, r["char"], r["mistakes"], r["total"], r["last_updated"]))
+    cursor.execute("DELETE FROM unigram_stats WHERE identity_id = ?", (anon_identity_id,))
+    
+    # 4. Merge bigram_stats
+    rows = cursor.execute("SELECT prev_char, char, mistakes, total, last_updated FROM bigram_stats WHERE identity_id = ?", (anon_identity_id,)).fetchall()
+    for r in rows:
+        cursor.execute("""
+            INSERT INTO bigram_stats (identity_id, prev_char, char, mistakes, total, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(identity_id, prev_char, char) DO UPDATE SET
+                mistakes = bigram_stats.mistakes + excluded.mistakes,
+                total = bigram_stats.total + excluded.total,
+                last_updated = CASE WHEN excluded.last_updated > bigram_stats.last_updated THEN excluded.last_updated ELSE bigram_stats.last_updated END
+        """, (target_identity_id, r["prev_char"], r["char"], r["mistakes"], r["total"], r["last_updated"]))
+    cursor.execute("DELETE FROM bigram_stats WHERE identity_id = ?", (anon_identity_id,))
+    
+    # 5. Merge trigram_stats
+    rows = cursor.execute("SELECT prev2_chars, char, mistakes, total, last_updated FROM trigram_stats WHERE identity_id = ?", (anon_identity_id,)).fetchall()
+    for r in rows:
+        cursor.execute("""
+            INSERT INTO trigram_stats (identity_id, prev2_chars, char, mistakes, total, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(identity_id, prev2_chars, char) DO UPDATE SET
+                mistakes = trigram_stats.mistakes + excluded.mistakes,
+                total = trigram_stats.total + excluded.total,
+                last_updated = CASE WHEN excluded.last_updated > trigram_stats.last_updated THEN excluded.last_updated ELSE trigram_stats.last_updated END
+        """, (target_identity_id, r["prev2_chars"], r["char"], r["mistakes"], r["total"], r["last_updated"]))
+    cursor.execute("DELETE FROM trigram_stats WHERE identity_id = ?", (anon_identity_id,))
+    
+    conn.commit()
+

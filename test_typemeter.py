@@ -494,5 +494,94 @@ class TestAuthFlask(unittest.TestCase):
         finally:
             typemeter_db.send_email = orig_send
 
+    def test_save_session_and_unauth_history_records(self):
+        csrf_token = self.client.get("/auth/csrf-token").get_json()["csrf_token"]
+        
+        # Save session anonymously
+        session_payload = {
+            "wpm": 72.5,
+            "raw_wpm": 78.0,
+            "accuracy": 95.0,
+            "mistakes_count": 3,
+            "total_chars": 200,
+            "time_seconds": 30.0,
+            "difficulty": "easy"
+        }
+        res_save = self.client.post(
+            "/api/save_session",
+            headers={"X-CSRF-Token": csrf_token},
+            json=session_payload
+        )
+        self.assertEqual(res_save.status_code, 201)
+        self.assertEqual(res_save.get_json()["status"], "success")
+        
+        # Verify /api/history returns 401 for unauthenticated request
+        res_hist = self.client.get("/api/history")
+        self.assertEqual(res_hist.status_code, 401)
+        self.assertIn(b"Authentication required", res_hist.data)
+        
+        # Verify /api/records returns 401 for unauthenticated request
+        res_rec = self.client.get("/api/records")
+        self.assertEqual(res_rec.status_code, 401)
+        self.assertIn(b"Authentication required", res_rec.data)
+
+    def test_authenticated_history_and_records(self):
+        csrf_token = self.client.get("/auth/csrf-token").get_json()["csrf_token"]
+        
+        # 1. Signup user
+        self.client.post(
+            "/auth/signup",
+            headers={"X-CSRF-Token": csrf_token},
+            json={"email": "hist_user@example.com", "password": "Password123", "display_name": "History User"}
+        )
+        
+        # 2. Save 2 typing sessions
+        s1 = {"wpm": 60.0, "raw_wpm": 65.0, "accuracy": 92.0, "mistakes_count": 4, "total_chars": 150, "time_seconds": 30.0, "difficulty": "easy"}
+        s2 = {"wpm": 85.0, "raw_wpm": 90.0, "accuracy": 98.0, "mistakes_count": 1, "total_chars": 200, "time_seconds": 25.0, "difficulty": "medium"}
+        
+        self.client.post("/api/save_session", headers={"X-CSRF-Token": csrf_token}, json=s1)
+        self.client.post("/api/save_session", headers={"X-CSRF-Token": csrf_token}, json=s2)
+        
+        # 3. Query /api/records
+        res_rec = self.client.get("/api/records")
+        self.assertEqual(res_rec.status_code, 200)
+        rec_data = res_rec.get_json()
+        self.assertEqual(rec_data["peak_wpm"], 85.0)
+        self.assertEqual(rec_data["peak_accuracy"], 98.0)
+        self.assertEqual(rec_data["total_sessions"], 2)
+        self.assertEqual(len(rec_data["trends"]), 2)
+        
+        # 4. Query /api/history
+        res_hist = self.client.get("/api/history")
+        self.assertEqual(res_hist.status_code, 200)
+        hist_data = res_hist.get_json()
+        self.assertEqual(hist_data["total_count"], 2)
+        self.assertEqual(len(hist_data["sessions"]), 2)
+        self.assertEqual(hist_data["sessions"][0]["wpm"], 85.0)
+
+    def test_anonymous_to_account_migration(self):
+        csrf_token = self.client.get("/auth/csrf-token").get_json()["csrf_token"]
+        
+        # 1. Save session as anonymous user
+        s_anon = {"wpm": 55.0, "raw_wpm": 60.0, "accuracy": 90.0, "mistakes_count": 5, "total_chars": 120, "time_seconds": 35.0, "difficulty": "easy"}
+        res_anon = self.client.post("/api/save_session", headers={"X-CSRF-Token": csrf_token}, json=s_anon)
+        self.assertEqual(res_anon.status_code, 201)
+        
+        # 2. Signup (triggers migration of identity_id cookie session data)
+        res_signup = self.client.post(
+            "/auth/signup",
+            headers={"X-CSRF-Token": csrf_token},
+            json={"email": "migrated@example.com", "password": "Password123"}
+        )
+        self.assertEqual(res_signup.status_code, 201)
+        
+        # 3. Query history as newly registered user -> prior anonymous session attached!
+        res_hist = self.client.get("/api/history")
+        self.assertEqual(res_hist.status_code, 200)
+        hist_data = res_hist.get_json()
+        self.assertEqual(hist_data["total_count"], 1)
+        self.assertEqual(hist_data["sessions"][0]["wpm"], 55.0)
+
 if __name__ == "__main__":
     unittest.main()
+

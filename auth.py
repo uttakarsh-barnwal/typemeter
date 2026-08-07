@@ -101,7 +101,23 @@ def signup():
     email_body = f"Hello,\n\nPlease verify your email by clicking this link:\n{verify_url}\n\nThis link will expire in 24 hours."
     typemeter_db.send_email(email, "Verify your TypeMeter Account", email_body)
     
-    return jsonify({"message": "Registration successful. Please check your email to verify your account."}), 201
+    # Create session with fixation protection & migrate anonymous history if present
+    session_id = typemeter_db.create_session(db, user_id)
+    session["session_id"] = session_id
+    
+    anon_cookie = request.cookies.get("identity_id")
+    if anon_cookie:
+        typemeter_db.migrate_anonymous_data(db, anon_cookie, user_id)
+    
+    return jsonify({
+        "message": "Registration successful. Please check your email to verify your account.",
+        "user": {
+            "id": user_id,
+            "email": email,
+            "display_name": display_name,
+            "email_verified": False
+        }
+    }), 201
 
 @auth_bp.route("/login", methods=["POST"])
 def login():
@@ -113,7 +129,10 @@ def login():
         return jsonify({"error": "Email and password are required."}), 400
         
     db = g.db
-    
+    ip = request.remote_addr or "unknown_ip"
+    if not typemeter_db.check_rate_limit(db, f"login_{ip}", "login", 15, 600):
+        return jsonify({"error": "Too many login attempts from this IP. Please try again in 10 minutes."}), 429
+        
     # User lockout / rate limit check
     user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -157,9 +176,15 @@ def login():
     session_id = typemeter_db.create_session(db, user["id"])
     session["session_id"] = session_id
     
+    # Migrate any anonymous data tied to identity_id cookie
+    anon_cookie = request.cookies.get("identity_id")
+    if anon_cookie:
+        typemeter_db.migrate_anonymous_data(db, anon_cookie, user["id"])
+    
     return jsonify({
         "message": "Login successful.",
         "user": {
+            "id": user["id"],
             "email": user["email"],
             "display_name": user["display_name"],
             "email_verified": bool(user["email_verified"])
@@ -397,6 +422,10 @@ def google_callback():
     session_id = typemeter_db.create_session(db, user["id"])
     session["session_id"] = session_id
     
+    anon_cookie = request.cookies.get("identity_id")
+    if anon_cookie:
+        typemeter_db.migrate_anonymous_data(db, anon_cookie, user["id"])
+    
     return redirect(url_for("gui_index") + "?auth_success=Login successful via Google!")
 
 @auth_bp.route("/me", methods=["GET"])
@@ -412,13 +441,14 @@ def get_current_user():
     # Touch session to update activity
     typemeter_db.touch_session(db, session_id)
     
-    user = db.execute("SELECT email, display_name, email_verified FROM users WHERE id = ?", (session_row["user_id"],)).fetchone()
+    user = db.execute("SELECT id, email, display_name, email_verified FROM users WHERE id = ?", (session_row["user_id"],)).fetchone()
     if not user:
         return jsonify({"authenticated": False})
         
     return jsonify({
         "authenticated": True,
         "user": {
+            "id": user["id"],
             "email": user["email"],
             "display_name": user["display_name"],
             "email_verified": bool(user["email_verified"])
