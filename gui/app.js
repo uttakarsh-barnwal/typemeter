@@ -627,12 +627,12 @@ function completeTest() {
 
     // Save full session metrics for personal history tracking
     const sessionData = {
-        wpm: currentWpm,
-        raw_wpm: currentRawWpm,
-        accuracy: currentAccuracy,
-        mistakes_count: totalMistakes,
-        total_chars: totalTypedChars,
-        time_seconds: testTimeSeconds,
+        wpm: parseFloat(wpm.toFixed(1)),
+        raw_wpm: parseFloat(rawWpm.toFixed(1)),
+        accuracy: parseFloat(accuracy.toFixed(1)),
+        mistakes_count: mistakeCount,
+        total_chars: attempt.length,
+        time_seconds: parseFloat(timeTaken.toFixed(2)),
         difficulty: currentDifficulty
     };
     fetch("/api/save_session", {
@@ -692,29 +692,59 @@ async function loadSessionUser() {
         const res = await fetch("/auth/me");
         const data = await res.json();
         
-        if (data.authenticated) {
+        const profileMenuContainer = document.getElementById("profile-menu-container");
+        const profileAvatarCircle = document.getElementById("profile-avatar-circle");
+        const profileDisplayNameNav = document.getElementById("profile-display-name-nav");
+        const dropdownDisplayName = document.getElementById("dropdown-display-name");
+        const dropdownEmail = document.getElementById("dropdown-email");
+        const dropdownChangePassBtn = document.getElementById("dropdown-change-pass-btn");
+
+        if (data.authenticated && data.user) {
             window.currentUser = data.user;
             const name = data.user.display_name || data.user.email.split("@")[0];
-            authUsername.textContent = name;
-            authUsername.style.display = "inline";
+            const initial = (data.user.display_name || data.user.email)[0].toUpperCase();
             
+            if (authBtn) authBtn.style.display = "none";
+            if (profileMenuContainer) profileMenuContainer.style.display = "inline-block";
+
+            if (profileAvatarCircle) profileAvatarCircle.textContent = initial;
+            if (profileDisplayNameNav) profileDisplayNameNav.textContent = name;
+            if (dropdownDisplayName) dropdownDisplayName.textContent = data.user.display_name || name;
+            if (dropdownEmail) dropdownEmail.textContent = data.user.email;
+
+            if (dropdownChangePassBtn) {
+                if (data.user.has_password || data.user.auth_provider === "password") {
+                    dropdownChangePassBtn.classList.remove("disabled");
+                    dropdownChangePassBtn.removeAttribute("disabled");
+                    dropdownChangePassBtn.title = "Change your account password";
+                } else {
+                    dropdownChangePassBtn.classList.add("disabled");
+                    dropdownChangePassBtn.setAttribute("disabled", "disabled");
+                    dropdownChangePassBtn.title = "Google OAuth accounts cannot change password.";
+                }
+            }
+
             // Set values inside Profile View
-            document.getElementById("profile-email").textContent = data.user.email;
-            document.getElementById("profile-display-name").textContent = data.user.display_name || "Not set";
-            document.getElementById("profile-status").innerHTML = data.user.email_verified 
-                ? "<span style='color: #10b981; font-weight: bold;'><i class='fa-solid fa-circle-check'></i> Verified</span>"
-                : "<span style='color: #f59e0b; font-weight: bold;'><i class='fa-solid fa-circle-exclamation'></i> Unverified</span>";
+            if (document.getElementById("profile-email")) {
+                document.getElementById("profile-email").textContent = data.user.email;
+            }
+            if (document.getElementById("profile-display-name")) {
+                document.getElementById("profile-display-name").textContent = data.user.display_name || "Not set";
+            }
+            if (document.getElementById("profile-status")) {
+                document.getElementById("profile-status").innerHTML = data.user.email_verified 
+                    ? "<span style='color: #10b981; font-weight: bold;'><i class='fa-solid fa-circle-check'></i> Verified</span>"
+                    : "<span style='color: #f59e0b; font-weight: bold;'><i class='fa-solid fa-circle-exclamation'></i> Unverified</span>";
+            }
                 
-            // Handle verification warning banner
-            if (!data.user.email_verified) {
-                verifyBanner.style.display = "flex";
-            } else {
-                verifyBanner.style.display = "none";
+            if (verifyBanner) {
+                verifyBanner.style.display = data.user.email_verified ? "none" : "flex";
             }
         } else {
             window.currentUser = null;
-            authUsername.style.display = "none";
-            verifyBanner.style.display = "none";
+            if (authBtn) authBtn.style.display = "inline-flex";
+            if (profileMenuContainer) profileMenuContainer.style.display = "none";
+            if (verifyBanner) verifyBanner.style.display = "none";
         }
     } catch (err) {
         console.error("Failed to load authenticated user profile:", err);
@@ -737,6 +767,98 @@ document.addEventListener("DOMContentLoaded", async () => {
     await fetchCsrfToken();
     await loadSessionUser();
     
+    // Elements for Profile Menu & Change Password
+    const profileAvatarBtn = document.getElementById("profile-avatar-btn");
+    const profileDropdown = document.getElementById("profile-dropdown");
+    const profileMenuContainer = document.getElementById("profile-menu-container");
+    const dropdownLogoutBtn = document.getElementById("dropdown-logout-btn");
+    const dropdownChangePassBtn = document.getElementById("dropdown-change-pass-btn");
+    const changePassForm = document.getElementById("change-pass-form");
+
+    if (profileAvatarBtn) {
+        profileAvatarBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (profileDropdown) {
+                const isVisible = profileDropdown.style.display === "block";
+                profileDropdown.style.display = isVisible ? "none" : "block";
+            }
+        });
+    }
+
+    // Close profile dropdown on outside click
+    document.addEventListener("click", (e) => {
+        if (profileDropdown && profileMenuContainer && !profileMenuContainer.contains(e.target)) {
+            profileDropdown.style.display = "none";
+        }
+    });
+
+    // Close dropdown or modal on Escape key
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+            if (profileDropdown) profileDropdown.style.display = "none";
+            if (authModal) authModal.style.display = "none";
+        }
+    });
+
+    if (dropdownLogoutBtn) {
+        dropdownLogoutBtn.addEventListener("click", async () => {
+            if (profileDropdown) profileDropdown.style.display = "none";
+            try {
+                await fetch("/auth/logout", {
+                    method: "POST",
+                    headers: { "X-CSRF-Token": window.csrfToken }
+                });
+                await loadSessionUser();
+                if (typeof resetTest === "function") resetTest();
+                window.location.href = "index.html";
+            } catch (err) {
+                console.error("Logout failed:", err);
+            }
+        });
+    }
+
+    if (dropdownChangePassBtn) {
+        dropdownChangePassBtn.addEventListener("click", () => {
+            if (profileDropdown) profileDropdown.style.display = "none";
+            if (!window.currentUser || (!window.currentUser.has_password && window.currentUser.auth_provider === "google")) return;
+            showAuthMessage("", "");
+            showView("change_password");
+            authModal.style.display = "flex";
+        });
+    }
+
+    if (changePassForm) {
+        changePassForm.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            showAuthMessage("", "");
+            const current_password = document.getElementById("change-curr-password").value;
+            const new_password = document.getElementById("change-new-password").value;
+
+            try {
+                const res = await fetch("/auth/change-password", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRF-Token": window.csrfToken
+                    },
+                    body: JSON.stringify({ current_password, new_password })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    showAuthMessage(data.message, "success");
+                    changePassForm.reset();
+                    setTimeout(() => {
+                        authModal.style.display = "none";
+                    }, 2000);
+                } else {
+                    showAuthMessage(data.error);
+                }
+            } catch (err) {
+                showAuthMessage("Failed to change password. Please try again.");
+            }
+        });
+    }
+    
     // Check URL parameters for triggers
     const urlParams = new URLSearchParams(window.location.search);
     
@@ -758,7 +880,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         currentResetToken = urlParams.get("reset_token");
         window.history.replaceState({}, document.title, window.location.pathname);
         
-        // Open Auth Modal and show Reset Password Form directly
         showView("reset");
         authModal.style.display = "flex";
     }
@@ -840,7 +961,6 @@ document.addEventListener("DOMContentLoaded", async () => {
                     authModal.style.display = "none";
                     loginForm.reset();
                     await loadSessionUser();
-                    // Reload sentence to use personal mistake stats instead of anonymous ones
                     resetTest();
                 } else {
                     showAuthMessage(data.error);
@@ -982,7 +1102,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     
     if (googleBtn) {
         googleBtn.addEventListener("click", () => {
-            // Redirect to backend endpoint initiating Google consent redirection
             window.location.href = "/auth/google";
         });
     }
@@ -990,32 +1109,37 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 // Helper switcher to toggle active modal views
 function showView(view) {
-    loginForm.style.display = "none";
-    signupForm.style.display = "none";
-    forgotForm.style.display = "none";
-    resetForm.style.display = "none";
-    profileView.style.display = "none";
-    oauthDivider.style.display = "none";
-    googleBtn.style.display = "none";
+    const changePassForm = document.getElementById("change-pass-form");
+    if (loginForm) loginForm.style.display = "none";
+    if (signupForm) signupForm.style.display = "none";
+    if (forgotForm) forgotForm.style.display = "none";
+    if (resetForm) resetForm.style.display = "none";
+    if (changePassForm) changePassForm.style.display = "none";
+    if (profileView) profileView.style.display = "none";
+    if (oauthDivider) oauthDivider.style.display = "none";
+    if (googleBtn) googleBtn.style.display = "none";
     
     if (view === "login") {
         modalTitle.textContent = "Sign In";
-        loginForm.style.display = "flex";
-        oauthDivider.style.display = "block";
-        googleBtn.style.display = "flex";
+        if (loginForm) loginForm.style.display = "flex";
+        if (oauthDivider) oauthDivider.style.display = "block";
+        if (googleBtn) googleBtn.style.display = "flex";
     } else if (view === "signup") {
         modalTitle.textContent = "Create Account";
-        signupForm.style.display = "flex";
-        oauthDivider.style.display = "block";
-        googleBtn.style.display = "flex";
+        if (signupForm) signupForm.style.display = "flex";
+        if (oauthDivider) oauthDivider.style.display = "block";
+        if (googleBtn) googleBtn.style.display = "flex";
     } else if (view === "forgot") {
         modalTitle.textContent = "Forgot Password";
-        forgotForm.style.display = "flex";
+        if (forgotForm) forgotForm.style.display = "flex";
     } else if (view === "reset") {
         modalTitle.textContent = "Reset Password";
-        resetForm.style.display = "flex";
+        if (resetForm) resetForm.style.display = "flex";
+    } else if (view === "change_password") {
+        modalTitle.textContent = "Change Password";
+        if (changePassForm) changePassForm.style.display = "flex";
     } else if (view === "profile") {
         modalTitle.textContent = "User Profile";
-        profileView.style.display = "block";
+        if (profileView) profileView.style.display = "block";
     }
 }

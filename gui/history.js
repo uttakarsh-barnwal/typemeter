@@ -59,25 +59,35 @@ document.addEventListener("DOMContentLoaded", async () => {
         authMessage.style.display = "none";
     }
 
-    function openModal() {
+    function openModal(view = "login") {
         hideMessage();
         authModal.style.display = "flex";
-        if (currentUser) {
-            modalTitle.textContent = "User Profile";
-            loginForm.style.display = "none";
-            signupForm.style.display = "none";
-            profileView.style.display = "block";
-            oauthDivider.style.display = "none";
-            googleBtn.style.display = "none";
-            document.getElementById("profile-email").textContent = currentUser.email;
-            document.getElementById("profile-display-name").textContent = currentUser.display_name || "N/A";
-        } else {
+        loginForm.style.display = "none";
+        signupForm.style.display = "none";
+        profileView.style.display = "none";
+        const changePassForm = document.getElementById("change-pass-form");
+        if (changePassForm) changePassForm.style.display = "none";
+        oauthDivider.style.display = "none";
+        googleBtn.style.display = "none";
+
+        if (view === "login") {
             modalTitle.textContent = "Sign In";
             loginForm.style.display = "block";
-            signupForm.style.display = "none";
-            profileView.style.display = "none";
             oauthDivider.style.display = "block";
             googleBtn.style.display = "flex";
+        } else if (view === "signup") {
+            modalTitle.textContent = "Create Account";
+            signupForm.style.display = "block";
+            oauthDivider.style.display = "block";
+            googleBtn.style.display = "flex";
+        } else if (view === "change_password") {
+            modalTitle.textContent = "Change Password";
+            if (changePassForm) changePassForm.style.display = "block";
+        } else if (view === "profile") {
+            modalTitle.textContent = "User Profile";
+            profileView.style.display = "block";
+            document.getElementById("profile-email").textContent = currentUser ? currentUser.email : "";
+            document.getElementById("profile-display-name").textContent = currentUser ? (currentUser.display_name || "N/A") : "";
         }
     }
 
@@ -85,41 +95,148 @@ document.addEventListener("DOMContentLoaded", async () => {
         authModal.style.display = "none";
     }
 
-    authBtn.addEventListener("click", openModal);
+    if (authBtn) authBtn.addEventListener("click", () => openModal(currentUser ? "profile" : "login"));
     closeModalBtn.addEventListener("click", closeModal);
-    if (unauthLoginBtn) unauthLoginBtn.addEventListener("click", openModal);
+    if (unauthLoginBtn) unauthLoginBtn.addEventListener("click", () => openModal("login"));
 
     goToSignup.addEventListener("click", (e) => {
         e.preventDefault();
-        hideMessage();
-        modalTitle.textContent = "Create Account";
-        loginForm.style.display = "none";
-        signupForm.style.display = "block";
+        openModal("signup");
     });
 
     goToLogin.addEventListener("click", (e) => {
         e.preventDefault();
-        hideMessage();
-        modalTitle.textContent = "Sign In";
-        signupForm.style.display = "none";
-        loginForm.style.display = "block";
+        openModal("login");
     });
+
+    // Profile Dropdown & Modal Controls
+    const profileAvatarBtn = document.getElementById("profile-avatar-btn");
+    const profileDropdown = document.getElementById("profile-dropdown");
+    const profileMenuContainer = document.getElementById("profile-menu-container");
+    const dropdownLogoutBtn = document.getElementById("dropdown-logout-btn");
+    const dropdownChangePassBtn = document.getElementById("dropdown-change-pass-btn");
+    const changePassForm = document.getElementById("change-pass-form");
+
+    if (profileAvatarBtn) {
+        profileAvatarBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (profileDropdown) {
+                const isVisible = profileDropdown.style.display === "block";
+                profileDropdown.style.display = isVisible ? "none" : "block";
+            }
+        });
+    }
+
+    document.addEventListener("click", (e) => {
+        if (profileDropdown && profileMenuContainer && !profileMenuContainer.contains(e.target)) {
+            profileDropdown.style.display = "none";
+        }
+    });
+
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+            if (profileDropdown) profileDropdown.style.display = "none";
+            if (authModal) authModal.style.display = "none";
+        }
+    });
+
+    if (dropdownLogoutBtn) {
+        dropdownLogoutBtn.addEventListener("click", async () => {
+            if (profileDropdown) profileDropdown.style.display = "none";
+            try {
+                await fetch("/auth/logout", {
+                    method: "POST",
+                    headers: { "X-CSRF-Token": csrfToken }
+                });
+                currentUser = null;
+                checkAuthState();
+            } catch (err) {
+                console.error("Logout failed:", err);
+            }
+        });
+    }
+
+    if (dropdownChangePassBtn) {
+        dropdownChangePassBtn.addEventListener("click", () => {
+            if (profileDropdown) profileDropdown.style.display = "none";
+            if (!currentUser || (!currentUser.has_password && currentUser.auth_provider === "google")) return;
+            openModal("change_password");
+        });
+    }
+
+    if (changePassForm) {
+        changePassForm.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            hideMessage();
+            const current_password = document.getElementById("change-curr-password").value;
+            const new_password = document.getElementById("change-new-password").value;
+
+            try {
+                const res = await fetch("/auth/change-password", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRF-Token": csrfToken
+                    },
+                    body: JSON.stringify({ current_password, new_password })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    showMessage(data.message, false);
+                    changePassForm.reset();
+                    setTimeout(() => closeModal(), 2000);
+                } else {
+                    showMessage(data.error, true);
+                }
+            } catch (err) {
+                showMessage("Failed to change password. Please try again.", true);
+            }
+        });
+    }
 
     // Check Auth State
     async function checkAuthState() {
         try {
             const res = await fetch("/auth/me");
             const data = await res.json();
+
+            const profileAvatarCircle = document.getElementById("profile-avatar-circle");
+            const profileDisplayNameNav = document.getElementById("profile-display-name-nav");
+            const dropdownDisplayName = document.getElementById("dropdown-display-name");
+            const dropdownEmail = document.getElementById("dropdown-email");
+
             if (data.authenticated && data.user) {
                 currentUser = data.user;
-                authUsername.textContent = currentUser.display_name || currentUser.email.split("@")[0];
-                authUsername.style.display = "inline";
+                const name = data.user.display_name || data.user.email.split("@")[0];
+                const initial = (data.user.display_name || data.user.email)[0].toUpperCase();
+
+                if (authBtn) authBtn.style.display = "none";
+                if (profileMenuContainer) profileMenuContainer.style.display = "inline-block";
+
+                if (profileAvatarCircle) profileAvatarCircle.textContent = initial;
+                if (profileDisplayNameNav) profileDisplayNameNav.textContent = name;
+                if (dropdownDisplayName) dropdownDisplayName.textContent = data.user.display_name || name;
+                if (dropdownEmail) dropdownEmail.textContent = data.user.email;
+
+                if (dropdownChangePassBtn) {
+                    if (data.user.has_password || data.user.auth_provider === "password") {
+                        dropdownChangePassBtn.classList.remove("disabled");
+                        dropdownChangePassBtn.removeAttribute("disabled");
+                        dropdownChangePassBtn.title = "Change your account password";
+                    } else {
+                        dropdownChangePassBtn.classList.add("disabled");
+                        dropdownChangePassBtn.setAttribute("disabled", "disabled");
+                        dropdownChangePassBtn.title = "Google OAuth accounts cannot change password.";
+                    }
+                }
+
                 unauthView.style.display = "none";
                 authView.style.display = "block";
                 fetchHistoryData();
             } else {
                 currentUser = null;
-                authUsername.style.display = "none";
+                if (authBtn) authBtn.style.display = "inline-flex";
+                if (profileMenuContainer) profileMenuContainer.style.display = "none";
                 authView.style.display = "none";
                 unauthView.style.display = "block";
             }
@@ -181,20 +298,21 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
     });
 
-    // Logout
-    logoutBtn.addEventListener("click", async () => {
-        try {
-            await fetch("/auth/logout", {
-                method: "POST",
-                headers: { "X-CSRF-Token": csrfToken }
-            });
-            currentUser = null;
-            closeModal();
-            checkAuthState();
-        } catch (err) {
-            console.error("Logout failed:", err);
-        }
-    });
+    if (logoutBtn) {
+        logoutBtn.addEventListener("click", async () => {
+            try {
+                await fetch("/auth/logout", {
+                    method: "POST",
+                    headers: { "X-CSRF-Token": csrfToken }
+                });
+                currentUser = null;
+                closeModal();
+                checkAuthState();
+            } catch (err) {
+                console.error("Logout failed:", err);
+            }
+        });
+    }
 
     googleBtn.addEventListener("click", () => {
         window.location.href = "/auth/google";
@@ -231,7 +349,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     function renderRecords(rec) {
         document.getElementById("rec-peak-wpm").textContent = rec.peak_wpm || 0;
         document.getElementById("rec-peak-acc").textContent = `${rec.peak_accuracy || 0}%`;
-        document.getElementById("rec-avg-wpm").textContent = rec.avg_wpm || 0;
+        const streakElem = document.getElementById("rec-streak");
+        if (streakElem) streakElem.textContent = `${rec.longest_streak || 0} ${rec.longest_streak === 1 ? 'day' : 'days'}`;
         document.getElementById("rec-total-sessions").textContent = rec.total_sessions || 0;
         
         const seconds = rec.total_time_seconds || 0;

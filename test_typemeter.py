@@ -582,6 +582,66 @@ class TestAuthFlask(unittest.TestCase):
         self.assertEqual(hist_data["total_count"], 1)
         self.assertEqual(hist_data["sessions"][0]["wpm"], 55.0)
 
+    def test_user_isolation(self):
+        """Verifies that two logged in users only see their own sessions."""
+        csrf_token = self.client.get("/auth/csrf-token").get_json()["csrf_token"]
+
+        # Signup User 1
+        self.client.post("/auth/signup", headers={"X-CSRF-Token": csrf_token}, json={"email": "user1@example.com", "password": "Password123"})
+        self.client.post("/api/save_session", headers={"X-CSRF-Token": csrf_token}, json={"wpm": 100.0, "raw_wpm": 105.0, "accuracy": 99.0, "mistakes_count": 0, "total_chars": 300, "time_seconds": 36.0, "difficulty": "easy"})
+        self.client.post("/auth/logout", headers={"X-CSRF-Token": csrf_token})
+
+        # Signup User 2
+        csrf_token2 = self.client.get("/auth/csrf-token").get_json()["csrf_token"]
+        self.client.post("/auth/signup", headers={"X-CSRF-Token": csrf_token2}, json={"email": "user2@example.com", "password": "Password123"})
+        self.client.post("/api/save_session", headers={"X-CSRF-Token": csrf_token2}, json={"wpm": 40.0, "raw_wpm": 45.0, "accuracy": 80.0, "mistakes_count": 10, "total_chars": 100, "time_seconds": 30.0, "difficulty": "easy"})
+
+        # User 2 history should only show User 2's session (WPM 40.0)
+        hist_user2 = self.client.get("/api/history").get_json()
+        self.assertEqual(hist_user2["total_count"], 1)
+        self.assertEqual(hist_user2["sessions"][0]["wpm"], 40.0)
+
+        # Login back as User 1
+        self.client.post("/auth/logout", headers={"X-CSRF-Token": csrf_token2})
+        csrf_token3 = self.client.get("/auth/csrf-token").get_json()["csrf_token"]
+        self.client.post("/auth/login", headers={"X-CSRF-Token": csrf_token3}, json={"email": "user1@example.com", "password": "Password123"})
+
+        # User 1 history should only show User 1's session (WPM 100.0)
+        hist_user1 = self.client.get("/api/history").get_json()
+        self.assertEqual(hist_user1["total_count"], 1)
+        self.assertEqual(hist_user1["sessions"][0]["wpm"], 100.0)
+
+    def test_change_password_endpoint(self):
+        csrf_token = self.client.get("/auth/csrf-token").get_json()["csrf_token"]
+
+        # 1. Reject unauthenticated request
+        res_unauth = self.client.post("/auth/change-password", headers={"X-CSRF-Token": csrf_token}, json={"current_password": "Old", "new_password": "New"})
+        self.assertEqual(res_unauth.status_code, 401)
+
+        # 2. Signup & login
+        self.client.post("/auth/signup", headers={"X-CSRF-Token": csrf_token}, json={"email": "changepass@example.com", "password": "Password123"})
+
+        # 3. Reject incorrect current password
+        res_wrong = self.client.post("/auth/change-password", headers={"X-CSRF-Token": csrf_token}, json={"current_password": "WrongPassword123", "new_password": "NewPassword123"})
+        self.assertEqual(res_wrong.status_code, 401)
+        self.assertIn(b"Incorrect current password", res_wrong.data)
+
+        # 4. Reject weak new password
+        res_weak = self.client.post("/auth/change-password", headers={"X-CSRF-Token": csrf_token}, json={"current_password": "Password123", "new_password": "weak"})
+        self.assertEqual(res_weak.status_code, 400)
+
+        # 5. Successful change password
+        res_success = self.client.post("/auth/change-password", headers={"X-CSRF-Token": csrf_token}, json={"current_password": "Password123", "new_password": "NewPassword123"})
+        self.assertEqual(res_success.status_code, 200)
+        self.assertIn(b"Password updated successfully", res_success.data)
+
+        # 6. Verify login with new password works
+        self.client.post("/auth/logout", headers={"X-CSRF-Token": csrf_token})
+        csrf_token2 = self.client.get("/auth/csrf-token").get_json()["csrf_token"]
+        res_login_new = self.client.post("/auth/login", headers={"X-CSRF-Token": csrf_token2}, json={"email": "changepass@example.com", "password": "NewPassword123"})
+        self.assertEqual(res_login_new.status_code, 200)
+
 if __name__ == "__main__":
     unittest.main()
+
 

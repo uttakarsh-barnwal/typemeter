@@ -16,14 +16,39 @@
             </a>
         </div>
         <div class="nav-controls">
-            <a href="history.html" id="history-nav-link" class="btn-nav" title="Session History & Personal Bests" style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 8px; text-decoration: none; color: var(--text-color); font-size: 14px; font-weight: 500; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); transition: all 0.2s;">
-                <i class="fa-solid fa-clock-rotate-left"></i>
-                <span>History</span>
-            </a>
-            <button id="auth-btn" class="btn-icon" title="Sign In / Profile">
-                <i class="fa-solid fa-user"></i>
-                <span id="auth-username" style="display: none; margin-left: 6px; font-size: 14px; font-weight: 500;">Guest</span>
+            <!-- Logged out: Sign In button -->
+            <button id="auth-btn" class="btn-icon" title="Sign In / Register" style="padding: 6px 12px; border-radius: 8px; font-size: 14px; font-weight: 500; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--text-primary); cursor: pointer;">
+                <i class="fa-solid fa-right-to-bracket"></i>
+                <span id="auth-btn-label" style="margin-left: 6px;">Sign In</span>
             </button>
+
+            <!-- Logged in: Profile Menu Dropdown -->
+            <div id="profile-menu-container" class="profile-menu-container" style="display: none;">
+                <button id="profile-avatar-btn" class="profile-avatar-btn" title="User Profile Menu">
+                    <div id="profile-avatar-circle" class="avatar-circle">U</div>
+                    <span id="profile-display-name-nav">User</span>
+                    <i class="fa-solid fa-chevron-down" style="font-size: 10px; margin-left: 2px;"></i>
+                </button>
+
+                <div id="profile-dropdown" class="profile-dropdown" style="display: none;">
+                    <div class="dropdown-header">
+                        <div id="dropdown-display-name" class="dropdown-name">User Name</div>
+                        <div id="dropdown-email" class="dropdown-email">user@example.com</div>
+                    </div>
+                    <div class="dropdown-divider"></div>
+                    <a href="history.html" class="dropdown-item">
+                        <i class="fa-solid fa-clock-rotate-left"></i> Session History
+                    </a>
+                    <button id="dropdown-change-pass-btn" class="dropdown-item">
+                        <i class="fa-solid fa-key"></i> Change Password
+                    </button>
+                    <div class="dropdown-divider"></div>
+                    <button id="dropdown-logout-btn" class="dropdown-item danger">
+                        <i class="fa-solid fa-right-from-bracket"></i> Log Out
+                    </button>
+                </div>
+            </div>
+
             <button id="theme-toggle" class="btn-icon" title="Toggle Theme">
                 <i class="fa-solid fa-moon"></i>
             </button>
@@ -199,6 +224,20 @@
                     <input type="password" id="reset-password" required placeholder="Min 8 characters, 1 letter & 1 number">
                 </div>
                 <button type="submit" class="btn-restart" style="width: 100%; margin-top: 15px;">Update Password</button>
+            </form>
+
+            <!-- Change Password View (Logged In) -->
+            <form id="change-pass-form" class="auth-form" style="display: none;">
+                <p class="auth-description">Update your password for your account.</p>
+                <div class="form-group">
+                    <label for="change-curr-password">Current Password</label>
+                    <input type="password" id="change-curr-password" required placeholder="••••••••">
+                </div>
+                <div class="form-group">
+                    <label for="change-new-password">New Password</label>
+                    <input type="password" id="change-new-password" required placeholder="Min 8 characters, 1 letter & 1 number">
+                </div>
+                <button type="submit" class="btn-restart" style="width: 100%; margin-top: 15px;">Change Password</button>
             </form>
             
             <!-- Profile View -->

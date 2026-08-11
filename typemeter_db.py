@@ -715,8 +715,44 @@ def get_user_history(conn, user_id, limit=50, offset=0):
     sessions = [dict(row) for row in rows]
     return sessions, total_count
 
+def calculate_user_streak(conn, user_id):
+    """Calculates the maximum consecutive days with at least one completed typing session."""
+    cursor = conn.cursor()
+    rows = cursor.execute("""
+        SELECT DISTINCT substr(created_at, 1, 10) as session_date
+        FROM typing_sessions
+        WHERE user_id = ?
+        ORDER BY session_date ASC
+    """, (user_id,)).fetchall()
+    
+    if not rows:
+        return 0
+        
+    dates = []
+    for r in rows:
+        try:
+            d = datetime.datetime.strptime(r["session_date"], "%Y-%m-%d").date()
+            dates.append(d)
+        except Exception:
+            continue
+            
+    if not dates:
+        return 0
+        
+    max_streak = 1
+    current_streak = 1
+    for i in range(1, len(dates)):
+        if (dates[i] - dates[i-1]).days == 1:
+            current_streak += 1
+            if current_streak > max_streak:
+                max_streak = current_streak
+        elif (dates[i] - dates[i-1]).days > 1:
+            current_streak = 1
+            
+    return max_streak
+
 def get_user_records(conn, user_id):
-    """Computes personal bests, overall statistics, and trend records for a logged-in user."""
+    """Computes personal bests, overall statistics, longest streak, and trend records for a logged-in user."""
     cursor = conn.cursor()
     
     stats_row = cursor.execute("""
@@ -742,11 +778,13 @@ def get_user_records(conn, user_id):
     """, (user_id,)).fetchall()
     
     trends = [dict(r) for r in reversed(trend_rows)]
+    streak = calculate_user_streak(conn, user_id)
     
     if not stats_row or not stats_row["total_sessions"]:
         return {
             "peak_wpm": 0.0,
             "peak_accuracy": 0.0,
+            "longest_streak": 0,
             "total_sessions": 0,
             "total_time_seconds": 0.0,
             "avg_wpm": 0.0,
@@ -759,6 +797,7 @@ def get_user_records(conn, user_id):
     return {
         "peak_wpm": round(stats_row["peak_wpm"] or 0.0, 1),
         "peak_accuracy": round(stats_row["peak_accuracy"] or 0.0, 1),
+        "longest_streak": streak,
         "total_sessions": stats_row["total_sessions"] or 0,
         "total_time_seconds": round(stats_row["total_time_seconds"] or 0.0, 1),
         "avg_wpm": round(stats_row["avg_wpm"] or 0.0, 1),

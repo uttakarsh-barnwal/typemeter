@@ -441,9 +441,11 @@ def get_current_user():
     # Touch session to update activity
     typemeter_db.touch_session(db, session_id)
     
-    user = db.execute("SELECT id, email, display_name, email_verified FROM users WHERE id = ?", (session_row["user_id"],)).fetchone()
+    user = db.execute("SELECT id, email, display_name, email_verified, auth_provider, password_hash FROM users WHERE id = ?", (session_row["user_id"],)).fetchone()
     if not user:
         return jsonify({"authenticated": False})
+        
+    has_password = bool(user["password_hash"] and user["auth_provider"] == "password")
         
     return jsonify({
         "authenticated": True,
@@ -451,6 +453,57 @@ def get_current_user():
             "id": user["id"],
             "email": user["email"],
             "display_name": user["display_name"],
-            "email_verified": bool(user["email_verified"])
+            "email_verified": bool(user["email_verified"]),
+            "auth_provider": user["auth_provider"],
+            "has_password": has_password
         }
     })
+
+@auth_bp.route("/change-password", methods=["POST"])
+def change_password():
+    """Authenticated endpoint allowing users to update their account password."""
+    db = g.db
+    session_id = session.get("session_id")
+    session_row = typemeter_db.get_session(db, session_id)
+    
+    if not session_row:
+        return jsonify({"error": "Authentication required."}), 401
+        
+    user_id = session_row["user_id"]
+    user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        return jsonify({"error": "User account not found."}), 404
+        
+    # Check if Google-only account without password
+    if not user["password_hash"] or user["auth_provider"] != "password":
+        return jsonify({"error": "Accounts registered via Google OAuth cannot change password."}), 400
+        
+    data = request.get_json() or {}
+    current_password = data.get("current_password", "")
+    new_password = data.get("new_password", "")
+    
+    if not current_password or not new_password:
+        return jsonify({"error": "Current password and new password are required."}), 400
+        
+    # Verify current password
+    if not typemeter_db.verify_password(current_password, user["password_hash"]):
+        return jsonify({"error": "Incorrect current password."}), 401
+        
+    # Validate new password policy
+    valid_pwd, pwd_err = validate_password_policy(new_password)
+    if not valid_pwd:
+        return jsonify({"error": pwd_err}), 400
+        
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    new_hash = typemeter_db.hash_password(new_password)
+    
+    db.execute(
+        "UPDATE users SET password_hash = ?, failed_login_attempts = 0, lockout_until = NULL, updated_at = ? WHERE id = ?",
+        (new_hash, now, user_id)
+    )
+    db.commit()
+    
+    # Invalidate all other active sessions for this user while keeping the current session
+    typemeter_db.invalidate_user_sessions(db, user_id, keep_session_id=session_id)
+    
+    return jsonify({"message": "Password updated successfully."})
