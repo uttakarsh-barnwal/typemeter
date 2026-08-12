@@ -241,8 +241,8 @@ class TestTypeMeter(unittest.TestCase):
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         cursor = self.conn.cursor()
         cursor.execute(
-            "INSERT INTO users (email, password_hash, auth_provider, email_verified, display_name, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?, ?)",
-            ("test_session@example.com", "hash", "password", "Tester", now, now)
+            "INSERT INTO users (email, password_hash, auth_provider, email_verified, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("test_session@example.com", "hash", "password", False, "Tester", now, now)
         )
         user_id = cursor.lastrowid
         self.conn.commit()
@@ -405,8 +405,8 @@ class TestAuthFlask(unittest.TestCase):
         conn = self.orig_get_db(self.db_path)
         pwd_hash = typemeter_db.hash_password("Password123")
         conn.execute(
-            "INSERT INTO users (email, password_hash, auth_provider, email_verified, display_name) VALUES (?, ?, 'password', 1, 'BF')",
-            ("bf@example.com", pwd_hash)
+            "INSERT INTO users (email, password_hash, auth_provider, email_verified, display_name) VALUES (?, ?, 'password', ?, 'BF')",
+            ("bf@example.com", pwd_hash, True)
         )
         conn.commit()
         conn.close()
@@ -443,8 +443,8 @@ class TestAuthFlask(unittest.TestCase):
             pwd_hash = typemeter_db.hash_password("Password123")
             conn = self.orig_get_db(self.db_path)
             conn.execute(
-                "INSERT INTO users (email, password_hash, auth_provider, email_verified) VALUES (?, ?, 'password', 1)",
-                ("reset@example.com", pwd_hash)
+                "INSERT INTO users (email, password_hash, auth_provider, email_verified) VALUES (?, ?, 'password', ?)",
+                ("reset@example.com", pwd_hash, True)
             )
             conn.commit()
             conn.close()

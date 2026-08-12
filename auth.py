@@ -80,8 +80,8 @@ def signup():
     
     cursor = db.cursor()
     cursor.execute(
-        "INSERT INTO users (email, password_hash, auth_provider, email_verified, display_name, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?, ?)",
-        (email, password_hash, "password", display_name, now, now)
+        "INSERT INTO users (email, password_hash, auth_provider, email_verified, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (email, password_hash, "password", False, display_name, now, now)
     )
     user_id = cursor.lastrowid
     
@@ -230,7 +230,7 @@ def verify_email():
                 return redirect(url_for("gui_index") + "?verify_error=Verification link has expired.")
                 
             # Verify user
-            db.execute("UPDATE users SET email_verified = 1, updated_at = ? WHERE id = ?", (now.isoformat(), row["user_id"]))
+            db.execute("UPDATE users SET email_verified = ?, updated_at = ? WHERE id = ?", (True, now.isoformat(), row["user_id"]))
             db.execute("UPDATE email_verification_tokens SET used_at = ? WHERE token_hash = ?", (now.isoformat(), token_hash))
     except Exception as e:
         current_app.logger.error(f"Error during email verification: {e}", exc_info=True)
@@ -420,8 +420,8 @@ def google_callback():
         if user:
             # 3. Account Linking: Add google_id and display name if missing, keeping auth_provider details
             db.execute(
-                "UPDATE users SET google_id = ?, display_name = COALESCE(display_name, ?), email_verified = 1, updated_at = ? WHERE id = ?",
-                (google_id, name, now, user["id"])
+                "UPDATE users SET google_id = ?, display_name = COALESCE(display_name, ?), email_verified = ?, updated_at = ? WHERE id = ?",
+                (google_id, name, True, now, user["id"])
             )
             db.commit()
             user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
@@ -430,8 +430,8 @@ def google_callback():
             is_new_user = True
             cursor = db.cursor()
             cursor.execute(
-                "INSERT INTO users (email, password_hash, auth_provider, google_id, email_verified, display_name, created_at, updated_at) VALUES (?, NULL, ?, ?, 1, ?, ?, ?)",
-                (email, "google", google_id, name, now, now)
+                "INSERT INTO users (email, password_hash, auth_provider, google_id, email_verified, display_name, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)",
+                (email, "google", google_id, True, name, now, now)
             )
             db.commit()
             user = db.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()

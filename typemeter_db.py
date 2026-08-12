@@ -337,7 +337,7 @@ def get_db(db_path="typemeter.db"):
             password_hash TEXT,
             auth_provider TEXT NOT NULL,
             google_id TEXT UNIQUE,
-            email_verified INTEGER DEFAULT 0,
+            email_verified BOOLEAN DEFAULT FALSE,
             display_name TEXT,
             failed_login_attempts INTEGER DEFAULT 0,
             lockout_until TEXT,
