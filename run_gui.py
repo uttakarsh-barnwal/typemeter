@@ -55,15 +55,71 @@ def create_app():
     
     app = Flask(__name__, static_folder=gui_dir, static_url_path="")
     
-    # Configure Flask Session signing
-    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+    # Configure Flask Session signing & Production Safety
+    is_prod = (os.environ.get("ENV") == "production")
+    if is_prod:
+        secret = os.environ.get("SECRET_KEY")
+        if not secret:
+            raise RuntimeError(
+                "CRITICAL SECURITY CONFIGURATION ERROR: SECRET_KEY environment variable MUST be explicitly set in production (ENV=production)."
+            )
+        app.config["SECRET_KEY"] = secret
+        app.config["DEBUG"] = False
+    else:
+        app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", secrets.token_hex(32))
     
     # Configure cookie parameters
-    is_prod = (os.environ.get("ENV") == "production")
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SECURE"] = is_prod
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     
+    # Structured Logging Setup
+    import logging
+    import time
+    logging.basicConfig(
+        level=logging.INFO if is_prod else logging.DEBUG,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+
+    @app.before_request
+    def start_timer():
+        from flask import g
+        g.start_time = time.time()
+
+    @app.after_request
+    def log_request(response):
+        from flask import g
+        if hasattr(g, "start_time"):
+            duration_ms = round((time.time() - g.start_time) * 1000, 2)
+            client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+            app.logger.info(f"{request.method} {request.path} {response.status_code} - {duration_ms}ms ({client_ip})")
+        return response
+
+    # Security Response Headers Middleware
+    @app.after_request
+    def add_security_headers(response):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' https://cdnjs.cloudflare.com; "
+            "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; "
+            "font-src 'self' https://cdnjs.cloudflare.com https://fonts.gstatic.com; "
+            "img-src 'self' data:;"
+        )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
+
+    # Generic Error Handler preventing 500 info disclosure
+    @app.errorhandler(500)
+    @app.errorhandler(Exception)
+    def handle_exception(e):
+        app.logger.error(f"Unhandled Server Error: {e}", exc_info=True)
+        if request.path.startswith("/api/") or request.path.startswith("/auth/"):
+            return jsonify({"error": "An internal server error occurred."}), 500
+        return "<h1>500 Internal Server Error</h1><p>An unexpected error occurred. Please try again later.</p>", 500
+
     # Register blueprints
     from auth import auth_bp, init_oauth
     app.register_blueprint(auth_bp, url_prefix="/auth")
@@ -90,6 +146,31 @@ def create_app():
         db = getattr(g, 'db', None)
         if db is not None:
             db.close()
+
+    # --- Health Check Endpoint ---
+    @app.route("/healthz", methods=["GET"])
+    @app.route("/health", methods=["GET"])
+    def health_check():
+        """Health check endpoint for production platform monitoring."""
+        try:
+            db = typemeter_db.get_db(app.config["DATABASE"])
+            cursor = db.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+            db.close()
+            return jsonify({
+                "status": "healthy",
+                "database": "connected",
+                "environment": os.environ.get("ENV", "development"),
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+            }), 200
+        except Exception as e:
+            app.logger.error(f"Health check database connection failure: {e}")
+            return jsonify({
+                "status": "unhealthy",
+                "database": "disconnected",
+                "error": "Database ping failed"
+            }), 503
 
     # --- CSRF Protection Middleware ---
     @app.before_request
@@ -206,7 +287,11 @@ def create_app():
             if sess:
                 user_id = sess["user_id"]
                 
-        rec_id = typemeter_db.save_typing_session(g.db, identity_id, user_id, data)
+        try:
+            rec_id = typemeter_db.save_typing_session(g.db, identity_id, user_id, data)
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+
         response = make_response(jsonify({"status": "success", "session_id": rec_id}), 201)
         if set_cookie:
             response.set_cookie("identity_id", identity_id, max_age=31536000, httponly=True, path="/")

@@ -22,9 +22,252 @@ USE_FITTED_PRIORS = False
 
 ALLOWED_SHORT = {"a", "i", "of", "to", "in", "it", "is", "on", "by", "or", "be", "at", "as", "an", "we", "us", "if", "my", "do", "no", "he", "up", "so", "am", "me", "go"}
 
-# --- SQLite Setup ---
+# --- Database Setup & Pooling Layer ---
+_pg_pool = None
+
+POSTGRES_SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS unigram_stats (
+        identity_id VARCHAR(255) NOT NULL,
+        char VARCHAR(10) NOT NULL,
+        mistakes DOUBLE PRECISION DEFAULT 0.0,
+        total DOUBLE PRECISION DEFAULT 0.0,
+        last_updated VARCHAR(100) NOT NULL,
+        PRIMARY KEY (identity_id, char)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS bigram_stats (
+        identity_id VARCHAR(255) NOT NULL,
+        prev_char VARCHAR(10) NOT NULL,
+        char VARCHAR(10) NOT NULL,
+        mistakes DOUBLE PRECISION DEFAULT 0.0,
+        total DOUBLE PRECISION DEFAULT 0.0,
+        last_updated VARCHAR(100) NOT NULL,
+        PRIMARY KEY (identity_id, prev_char, char)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS trigram_stats (
+        identity_id VARCHAR(255) NOT NULL,
+        prev2_chars VARCHAR(10) NOT NULL,
+        char VARCHAR(10) NOT NULL,
+        mistakes DOUBLE PRECISION DEFAULT 0.0,
+        total DOUBLE PRECISION DEFAULT 0.0,
+        last_updated VARCHAR(100) NOT NULL,
+        PRIMARY KEY (identity_id, prev2_chars, char)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS global_priors (
+        level VARCHAR(50) PRIMARY KEY,
+        alpha DOUBLE PRECISION NOT NULL,
+        beta DOUBLE PRECISION NOT NULL,
+        fitted_at VARCHAR(100) NOT NULL,
+        sample_size INTEGER DEFAULT 0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS mistake_events (
+        id SERIAL PRIMARY KEY,
+        identity_id VARCHAR(255) NOT NULL,
+        context_before VARCHAR(20),
+        expected_char VARCHAR(10),
+        typed_char VARCHAR(10),
+        word VARCHAR(100),
+        position_in_word INTEGER DEFAULT 0,
+        created_at VARCHAR(100) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password_hash TEXT,
+        auth_provider VARCHAR(50) NOT NULL,
+        google_id VARCHAR(255) UNIQUE,
+        email_verified BOOLEAN DEFAULT FALSE,
+        display_name VARCHAR(255),
+        failed_login_attempts INTEGER DEFAULT 0,
+        lockout_until VARCHAR(100),
+        created_at VARCHAR(100) NOT NULL,
+        updated_at VARCHAR(100) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS email_verification_tokens (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash VARCHAR(255) UNIQUE NOT NULL,
+        expires_at VARCHAR(100) NOT NULL,
+        used_at VARCHAR(100),
+        created_at VARCHAR(100) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash VARCHAR(255) UNIQUE NOT NULL,
+        expires_at VARCHAR(100) NOT NULL,
+        used_at VARCHAR(100),
+        created_at VARCHAR(100) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        session_id VARCHAR(255) PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at VARCHAR(100) NOT NULL,
+        last_seen_at VARCHAR(100) NOT NULL,
+        expires_at VARCHAR(100) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ip_rate_limits (
+        key VARCHAR(255) NOT NULL,
+        action VARCHAR(100) NOT NULL,
+        timestamp VARCHAR(100) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS typing_sessions (
+        id SERIAL PRIMARY KEY,
+        identity_id VARCHAR(255) NOT NULL,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        wpm DOUBLE PRECISION NOT NULL,
+        raw_wpm DOUBLE PRECISION NOT NULL,
+        accuracy DOUBLE PRECISION NOT NULL,
+        mistakes_count INTEGER DEFAULT 0,
+        total_chars INTEGER DEFAULT 0,
+        time_seconds DOUBLE PRECISION DEFAULT 0.0,
+        difficulty VARCHAR(50) NOT NULL DEFAULT 'easy',
+        created_at VARCHAR(100) NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+    "CREATE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id)",
+    "CREATE INDEX IF NOT EXISTS idx_email_tokens_hash ON email_verification_tokens(token_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_reset_tokens_hash ON password_reset_tokens(token_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_rate_limits_key_timestamp ON ip_rate_limits(key, timestamp)",
+    "CREATE INDEX IF NOT EXISTS idx_typing_sessions_user_id ON typing_sessions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_typing_sessions_identity ON typing_sessions(identity_id)",
+]
+
+_pg_pool = None
+
+def get_pg_pool(db_url):
+    """Initializes or retrieves the PostgreSQL connection pool."""
+    global _pg_pool
+    if _pg_pool is None:
+        try:
+            import psycopg2.pool
+            if db_url.startswith("postgres://"):
+                db_url = db_url.replace("postgres://", "postgresql://", 1)
+            _pg_pool = psycopg2.pool.ThreadedConnectionPool(minconn=1, maxconn=20, dsn=db_url)
+            
+            # Execute schema initialization once on pool startup
+            init_conn = _pg_pool.getconn()
+            try:
+                init_postgres_schema(init_conn)
+            finally:
+                _pg_pool.putconn(init_conn)
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize PostgreSQL connection pool: {e}")
+    return _pg_pool
+
+class PostgresCursorWrapper:
+    """Wrapper around psycopg2 RealDictCursor providing sqlite3.Row compatibility."""
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self._lastrowid = None
+
+    def execute(self, sql, params=()):
+        if "?" in sql:
+            sql = sql.replace("?", "%s")
+        if "INSERT INTO" in sql and "RETURNING" not in sql:
+            if any(t in sql for t in ["typing_sessions", "mistake_events", "users", "email_verification_tokens", "password_reset_tokens"]):
+                sql += " RETURNING id"
+                self._cursor.execute(sql, params)
+                res = self._cursor.fetchone()
+                if res and "id" in res:
+                    self._lastrowid = res["id"]
+                return self
+        self._cursor.execute(sql, params)
+        return self
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    @property
+    def lastrowid(self):
+        return self._lastrowid
+
+class PostgresConnectionWrapper:
+    """Wrapper for PostgreSQL connections providing sqlite3-compatible interface."""
+    def __init__(self, pg_conn, pool=None):
+        self._conn = pg_conn
+        self._pool = pool
+        self.is_postgres = True
+
+    def cursor(self):
+        from psycopg2.extras import RealDictCursor
+        return PostgresCursorWrapper(self._conn.cursor(cursor_factory=RealDictCursor))
+
+    def execute(self, sql, params=()):
+        c = self.cursor()
+        c.execute(sql, params)
+        return c
+
+    def commit(self):
+        return self._conn.commit()
+
+    def rollback(self):
+        return self._conn.rollback()
+
+    def close(self):
+        if self._pool:
+            self._pool.putconn(self._conn)
+        else:
+            self._conn.close()
+
+def init_postgres_schema(pg_conn):
+    """Executes PostgreSQL DDL statements."""
+    cursor = pg_conn.cursor()
+    for stmt in POSTGRES_SCHEMA:
+        cursor.execute(stmt)
+    pg_conn.commit()
+
 def get_db(db_path="typemeter.db"):
-    """Connects to the database and initializes tables if they do not exist."""
+    """Connects to database: uses DATABASE_URL for Postgres connection pooling if set, or local SQLite fallback if unset."""
+    db_url = os.environ.get("DATABASE_URL")
+    if db_url:
+        pool = get_pg_pool(db_url)
+        pg_conn = None
+        for _ in range(3):
+            try:
+                pg_conn = pool.getconn()
+                cursor = pg_conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.close()
+                break
+            except Exception:
+                if pg_conn:
+                    try:
+                        pool.putconn(pg_conn, close=True)
+                    except Exception:
+                        pass
+                    pg_conn = None
+
+        if pg_conn is None:
+            pg_conn = pool.getconn()
+
+        return PostgresConnectionWrapper(pg_conn, pool=pool)
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     
@@ -239,36 +482,96 @@ def get_priors(conn):
             pass
     return priors
 
-def final_rate(conn, identity_id, prev2_chars, char):
-    """Calculates interpolated error rate for a character under a given context."""
+def load_user_stats_cache(conn, identity_id):
+    """Bulk loads all global priors and user n-gram stats into memory for O(1) batch word scoring."""
     priors = get_priors(conn)
-    levels_data = []
-    
     cursor = conn.cursor()
     
-    # 1. Unigram
-    cursor.execute("SELECT mistakes, total FROM unigram_stats WHERE identity_id = ? AND char = ?", (identity_id, char))
-    row = cursor.fetchone()
-    if row:
-        alpha, beta = priors["unigram"]
-        levels_data.append(("unigram", row["mistakes"], row["total"], alpha, beta))
+    unigrams = {}
+    try:
+        cursor.execute("SELECT char, mistakes, total FROM unigram_stats WHERE identity_id = ?", (identity_id,))
+        for row in cursor.fetchall():
+            unigrams[row["char"]] = (row["mistakes"], row["total"])
+    except Exception:
+        pass
         
-    # 2. Bigram
-    if len(prev2_chars) >= 1:
-        prev_char = prev2_chars[-1]
-        cursor.execute("SELECT mistakes, total FROM bigram_stats WHERE identity_id = ? AND prev_char = ? AND char = ?", (identity_id, prev_char, char))
-        row = cursor.fetchone()
-        if row:
-            alpha, beta = priors["bigram"]
-            levels_data.append(("bigram", row["mistakes"], row["total"], alpha, beta))
+    bigrams = {}
+    try:
+        cursor.execute("SELECT prev_char, char, mistakes, total FROM bigram_stats WHERE identity_id = ?", (identity_id,))
+        for row in cursor.fetchall():
+            bigrams[(row["prev_char"], row["char"])] = (row["mistakes"], row["total"])
+    except Exception:
+        pass
+
+    trigrams = {}
+    try:
+        cursor.execute("SELECT prev2_chars, char, mistakes, total FROM trigram_stats WHERE identity_id = ?", (identity_id,))
+        for row in cursor.fetchall():
+            trigrams[(row["prev2_chars"], row["char"])] = (row["mistakes"], row["total"])
+    except Exception:
+        pass
+
+    return {
+        "priors": priors,
+        "unigrams": unigrams,
+        "bigrams": bigrams,
+        "trigrams": trigrams
+    }
+
+def final_rate(conn, identity_id, prev2_chars, char, cache=None):
+    """Calculates interpolated error rate for a character under a given context."""
+    if cache is not None:
+        priors = cache["priors"]
+        levels_data = []
+        
+        # 1. Unigram
+        u_data = cache["unigrams"].get(char)
+        if u_data:
+            alpha, beta = priors["unigram"]
+            levels_data.append(("unigram", u_data[0], u_data[1], alpha, beta))
             
-    # 3. Trigram
-    if len(prev2_chars) == 2:
-        cursor.execute("SELECT mistakes, total FROM trigram_stats WHERE identity_id = ? AND prev2_chars = ? AND char = ?", (identity_id, prev2_chars, char))
+        # 2. Bigram
+        if len(prev2_chars) >= 1:
+            prev_char = prev2_chars[-1]
+            b_data = cache["bigrams"].get((prev_char, char))
+            if b_data:
+                alpha, beta = priors["bigram"]
+                levels_data.append(("bigram", b_data[0], b_data[1], alpha, beta))
+                
+        # 3. Trigram
+        if len(prev2_chars) == 2:
+            t_data = cache["trigrams"].get((prev2_chars, char))
+            if t_data:
+                alpha, beta = priors["trigram"]
+                levels_data.append(("trigram", t_data[0], t_data[1], alpha, beta))
+    else:
+        priors = get_priors(conn)
+        levels_data = []
+        cursor = conn.cursor()
+        
+        # 1. Unigram
+        cursor.execute("SELECT mistakes, total FROM unigram_stats WHERE identity_id = ? AND char = ?", (identity_id, char))
         row = cursor.fetchone()
         if row:
-            alpha, beta = priors["trigram"]
-            levels_data.append(("trigram", row["mistakes"], row["total"], alpha, beta))
+            alpha, beta = priors["unigram"]
+            levels_data.append(("unigram", row["mistakes"], row["total"], alpha, beta))
+            
+        # 2. Bigram
+        if len(prev2_chars) >= 1:
+            prev_char = prev2_chars[-1]
+            cursor.execute("SELECT mistakes, total FROM bigram_stats WHERE identity_id = ? AND prev_char = ? AND char = ?", (identity_id, prev_char, char))
+            row = cursor.fetchone()
+            if row:
+                alpha, beta = priors["bigram"]
+                levels_data.append(("bigram", row["mistakes"], row["total"], alpha, beta))
+                
+        # 3. Trigram
+        if len(prev2_chars) == 2:
+            cursor.execute("SELECT mistakes, total FROM trigram_stats WHERE identity_id = ? AND prev2_chars = ? AND char = ?", (identity_id, prev2_chars, char))
+            row = cursor.fetchone()
+            if row:
+                alpha, beta = priors["trigram"]
+                levels_data.append(("trigram", row["mistakes"], row["total"], alpha, beta))
             
     if not levels_data:
         alpha, beta = priors["unigram"]
@@ -288,7 +591,7 @@ def final_rate(conn, identity_id, prev2_chars, char):
         
     return sum(w * p for w, p in zip(weights, posteriors))
 
-def word_score(conn, identity_id, word):
+def word_score(conn, identity_id, word, cache=None):
     """Scores a word's difficulty as the mean n-gram error probability of its letters."""
     if not word:
         return 0.0
@@ -296,7 +599,7 @@ def word_score(conn, identity_id, word):
     for i in range(len(word)):
         context = word[max(0, i - 2):i]
         char = word[i]
-        total_rate += final_rate(conn, identity_id, context, char)
+        total_rate += final_rate(conn, identity_id, context, char, cache=cache)
     return total_rate / len(word)
 
 # --- Stats Ingestion Logic ---
@@ -435,6 +738,9 @@ def backend_select_words(conn, difficulty, count, identity_id):
     """Selects and shuffles a weighted sentence from pools based on mistake rates."""
     google_words, words_easy, words_medium, words_hard = load_word_pools()
     
+    # Bulk-load user stats cache once for fast O(1) in-memory word scoring
+    cache = load_user_stats_cache(conn, identity_id)
+    
     # 1. Set up pools matching app.js divisions
     if google_words:
         easy_pool = clean_pool(google_words[:600])
@@ -450,7 +756,7 @@ def backend_select_words(conn, difficulty, count, identity_id):
     sentence_list = []
     if difficulty == "easy":
         # Easy: strictly most common words
-        scores = [word_score(conn, identity_id, w) for w in easy_pool]
+        scores = [word_score(conn, identity_id, w, cache=cache) for w in easy_pool]
         probs_soft = softmax(scores, SELECTION_TEMPERATURE)
         probs = [(1.0 - SELECTION_EPSILON) * p + SELECTION_EPSILON * (1.0 / len(easy_pool)) for p in probs_soft]
         sentence_list = weighted_sample_without_replacement(easy_pool, probs, count)
@@ -461,13 +767,13 @@ def backend_select_words(conn, difficulty, count, identity_id):
         easy_count = count - medium_count
         
         # Easy selection
-        scores_e = [word_score(conn, identity_id, w) for w in easy_pool]
+        scores_e = [word_score(conn, identity_id, w, cache=cache) for w in easy_pool]
         probs_e_soft = softmax(scores_e, SELECTION_TEMPERATURE)
         probs_e = [(1.0 - SELECTION_EPSILON) * p + SELECTION_EPSILON * (1.0 / len(easy_pool)) for p in probs_e_soft]
         selected_easy = weighted_sample_without_replacement(easy_pool, probs_e, easy_count)
         
         # Medium selection
-        scores_m = [word_score(conn, identity_id, w) for w in medium_pool]
+        scores_m = [word_score(conn, identity_id, w, cache=cache) for w in medium_pool]
         probs_m_soft = softmax(scores_m, SELECTION_TEMPERATURE)
         probs_m = [(1.0 - SELECTION_EPSILON) * p + SELECTION_EPSILON * (1.0 / len(medium_pool)) for p in probs_m_soft]
         selected_medium = weighted_sample_without_replacement(medium_pool, probs_m, medium_count)
@@ -485,13 +791,13 @@ def backend_select_words(conn, difficulty, count, identity_id):
         combined_hard_pool = clean_pool(hard_pool + words_hard)
         
         # Easy/Medium selection
-        scores_em = [word_score(conn, identity_id, w) for w in easy_medium_pool]
+        scores_em = [word_score(conn, identity_id, w, cache=cache) for w in easy_medium_pool]
         probs_em_soft = softmax(scores_em, SELECTION_TEMPERATURE)
         probs_em = [(1.0 - SELECTION_EPSILON) * p + SELECTION_EPSILON * (1.0 / len(easy_medium_pool)) for p in probs_em_soft]
         selected_em = weighted_sample_without_replacement(easy_medium_pool, probs_em, easy_medium_count)
         
         # Hard selection
-        scores_h = [word_score(conn, identity_id, w) for w in combined_hard_pool]
+        scores_h = [word_score(conn, identity_id, w, cache=cache) for w in combined_hard_pool]
         probs_h_soft = softmax(scores_h, SELECTION_TEMPERATURE)
         probs_h = [(1.0 - SELECTION_EPSILON) * p + SELECTION_EPSILON * (1.0 / len(combined_hard_pool)) for p in probs_h_soft]
         selected_h = weighted_sample_without_replacement(combined_hard_pool, probs_h, hard_count)
@@ -554,25 +860,29 @@ def check_rate_limit(conn, key, action, limit, window_seconds):
 
 def send_email(to_email, subject, body):
     """
-    Sends an email using configured SMTP settings, or fallback to logging.
-    Loads host/port/credentials dynamically to support zero-dependency setups.
+    Sends an email using configured SMTP settings, or fallback to logging in non-production.
+    Loads host/port/credentials dynamically.
     """
     host = os.environ.get("SMTP_HOST")
     port_str = os.environ.get("SMTP_PORT", "587")
     user = os.environ.get("SMTP_USER")
     password = os.environ.get("SMTP_PASS")
     sender = os.environ.get("SMTP_FROM", "noreply@typemeter.local")
-    
-    print(f"\n==================================================")
-    print(f"📧 EMAIL SENT TO: {to_email}")
-    print(f"Subject: {subject}")
-    print(f"Content:\n{body}")
-    print(f"==================================================\n")
+    is_prod = (os.environ.get("ENV") == "production")
     
     if not host or not user or not password:
-        # Fallback to stdout log (standard for local dev/test environment)
-        return True
-        
+        if is_prod:
+            import logging
+            logging.getLogger("typemeter").error(f"SMTP is not configured in production mode. Cannot deliver email '{subject}' to {to_email}.")
+            return False
+        else:
+            print(f"\n==================================================")
+            print(f"📧 EMAIL SENT TO: {to_email}")
+            print(f"Subject: {subject}")
+            print(f"Content:\n{body}")
+            print(f"==================================================\n")
+            return True
+            
     try:
         port = int(port_str)
         msg = MIMEText(body)
@@ -586,7 +896,8 @@ def send_email(to_email, subject, body):
             server.sendmail(sender, [to_email], msg.as_string())
         return True
     except Exception as e:
-        print(f"[!] SMTP email delivery failed: {e}")
+        import logging
+        logging.getLogger("typemeter").error(f"SMTP email delivery failed to {to_email}: {e}")
         return False
 
 # --- Session Manager Helpers ---
@@ -680,14 +991,24 @@ def cleanup_sessions(conn):
 # --- Session History & Anonymous Migration Helpers ---
 
 def save_typing_session(conn, identity_id, user_id, data):
-    """Saves a completed typing session record."""
-    wpm = float(data.get("wpm", 0.0))
-    raw_wpm = float(data.get("raw_wpm", 0.0))
-    accuracy = float(data.get("accuracy", 0.0))
-    mistakes_count = int(data.get("mistakes_count", 0))
-    total_chars = int(data.get("total_chars", 0))
-    time_seconds = float(data.get("time_seconds", 0.0))
-    difficulty = str(data.get("difficulty", "easy")).strip()
+    """Saves a completed typing session record after validating numeric inputs and ranges."""
+    try:
+        wpm = float(data.get("wpm", 0.0))
+        raw_wpm = float(data.get("raw_wpm", 0.0))
+        accuracy = float(data.get("accuracy", 0.0))
+        mistakes_count = int(data.get("mistakes_count", 0))
+        total_chars = int(data.get("total_chars", 0))
+        time_seconds = float(data.get("time_seconds", 0.0))
+    except (ValueError, TypeError):
+        raise ValueError("Invalid numeric data type in session metrics.")
+
+    difficulty = str(data.get("difficulty", "easy")).strip().lower()
+    if difficulty not in ("easy", "medium", "hard"):
+        difficulty = "easy"
+
+    if not (0.0 <= wpm <= 500.0 and 0.0 <= raw_wpm <= 500.0 and 0.0 <= accuracy <= 100.0 and time_seconds >= 0.0 and mistakes_count >= 0 and total_chars >= 0):
+        raise ValueError("Session metrics out of allowed physical range.")
+
     created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     
     cursor = conn.cursor()

@@ -434,15 +434,43 @@ document.addEventListener("DOMContentLoaded", async () => {
             
             const tr = document.createElement("tr");
             tr.style.borderBottom = "1px solid var(--border-color)";
-            tr.innerHTML = `
-                <td style="padding: 12px; color: var(--sub-color);">${dateStr}</td>
-                <td style="padding: 12px; font-weight: 700; color: var(--main-color);">${s.wpm}</td>
-                <td style="padding: 12px; color: var(--text-color);">${s.raw_wpm}</td>
-                <td style="padding: 12px; color: var(--text-color);">${s.accuracy}%</td>
-                <td style="padding: 12px; color: ${s.mistakes_count > 0 ? 'var(--incorrect)' : 'var(--sub-color)'};">${s.mistakes_count}</td>
-                <td style="padding: 12px; text-transform: capitalize; color: var(--sub-color);">${s.difficulty}</td>
-                <td style="padding: 12px; color: var(--sub-color);">${s.time_seconds}s</td>
-            `;
+
+            const tdDate = document.createElement("td");
+            tdDate.style.cssText = "padding: 12px; color: var(--sub-color);";
+            tdDate.textContent = dateStr;
+
+            const tdWpm = document.createElement("td");
+            tdWpm.style.cssText = "padding: 12px; font-weight: 700; color: var(--main-color);";
+            tdWpm.textContent = String(s.wpm);
+
+            const tdRawWpm = document.createElement("td");
+            tdRawWpm.style.cssText = "padding: 12px; color: var(--text-color);";
+            tdRawWpm.textContent = String(s.raw_wpm);
+
+            const tdAcc = document.createElement("td");
+            tdAcc.style.cssText = "padding: 12px; color: var(--text-color);";
+            tdAcc.textContent = s.accuracy + "%";
+
+            const tdMistakes = document.createElement("td");
+            tdMistakes.style.cssText = `padding: 12px; color: ${s.mistakes_count > 0 ? 'var(--incorrect)' : 'var(--sub-color)'};`;
+            tdMistakes.textContent = String(s.mistakes_count);
+
+            const tdDiff = document.createElement("td");
+            tdDiff.style.cssText = "padding: 12px; text-transform: capitalize; color: var(--sub-color);";
+            tdDiff.textContent = String(s.difficulty);
+
+            const tdTime = document.createElement("td");
+            tdTime.style.cssText = "padding: 12px; color: var(--sub-color);";
+            tdTime.textContent = s.time_seconds + "s";
+
+            tr.appendChild(tdDate);
+            tr.appendChild(tdWpm);
+            tr.appendChild(tdRawWpm);
+            tr.appendChild(tdAcc);
+            tr.appendChild(tdMistakes);
+            tr.appendChild(tdDiff);
+            tr.appendChild(tdTime);
+
             tbody.appendChild(tr);
         });
     }

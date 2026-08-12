@@ -3,7 +3,7 @@ import re
 import hmac
 import secrets
 import datetime
-from flask import Blueprint, request, jsonify, session, url_for, redirect, current_app, g
+from flask import Blueprint, request, jsonify, session, url_for, redirect, current_app, g, make_response
 from authlib.integrations.flask_client import OAuth
 import typemeter_db
 
@@ -102,6 +102,7 @@ def signup():
     typemeter_db.send_email(email, "Verify your TypeMeter Account", email_body)
     
     # Create session with fixation protection & migrate anonymous history if present
+    # Create session with fixation protection & migrate anonymous history on account creation only
     session_id = typemeter_db.create_session(db, user_id)
     session["session_id"] = session_id
     
@@ -109,7 +110,7 @@ def signup():
     if anon_cookie:
         typemeter_db.migrate_anonymous_data(db, anon_cookie, user_id)
     
-    return jsonify({
+    response = make_response(jsonify({
         "message": "Registration successful. Please check your email to verify your account.",
         "user": {
             "id": user_id,
@@ -117,7 +118,9 @@ def signup():
             "display_name": display_name,
             "email_verified": False
         }
-    }), 201
+    }), 201)
+    response.delete_cookie("identity_id", path="/")
+    return response
 
 @auth_bp.route("/login", methods=["POST"])
 def login():
@@ -149,19 +152,24 @@ def login():
         return jsonify({"error": "Invalid email or password."}), 401
         
     if not typemeter_db.verify_password(password, user["password_hash"]):
-        # Increment failed attempts
-        failed = user["failed_login_attempts"] + 1
-        lockout_until = None
-        if failed >= 5:
-            lockout_until = (now + datetime.timedelta(minutes=15)).isoformat()
-            
+        # Atomic increment of failed_login_attempts and conditional lockout calculation
+        lockout_time_str = (now + datetime.timedelta(minutes=15)).isoformat()
         db.execute(
-            "UPDATE users SET failed_login_attempts = ?, lockout_until = ?, updated_at = ? WHERE id = ?",
-            (failed, lockout_until, now.isoformat(), user["id"])
+            """
+            UPDATE users 
+            SET failed_login_attempts = failed_login_attempts + 1, 
+                lockout_until = CASE WHEN failed_login_attempts + 1 >= 5 THEN ? ELSE lockout_until END, 
+                updated_at = ? 
+            WHERE id = ?
+            """,
+            (lockout_time_str, now.isoformat(), user["id"])
         )
         db.commit()
         
-        if failed >= 5:
+        updated_user = db.execute("SELECT failed_login_attempts FROM users WHERE id = ?", (user["id"],)).fetchone()
+        current_failed = updated_user["failed_login_attempts"] if updated_user else 5
+        
+        if current_failed >= 5:
             return jsonify({"error": "Too many failed login attempts. Your account has been locked for 15 minutes."}), 429
         return jsonify({"error": "Invalid email or password."}), 401
         
@@ -176,12 +184,7 @@ def login():
     session_id = typemeter_db.create_session(db, user["id"])
     session["session_id"] = session_id
     
-    # Migrate any anonymous data tied to identity_id cookie
-    anon_cookie = request.cookies.get("identity_id")
-    if anon_cookie:
-        typemeter_db.migrate_anonymous_data(db, anon_cookie, user["id"])
-    
-    return jsonify({
+    response = make_response(jsonify({
         "message": "Login successful.",
         "user": {
             "id": user["id"],
@@ -189,7 +192,9 @@ def login():
             "display_name": user["display_name"],
             "email_verified": bool(user["email_verified"])
         }
-    })
+    }))
+    response.delete_cookie("identity_id", path="/")
+    return response
 
 @auth_bp.route("/logout", methods=["POST"])
 def logout():
@@ -198,7 +203,9 @@ def logout():
     if session_id:
         typemeter_db.delete_session(db, session_id)
         session.pop("session_id", None)
-    return jsonify({"message": "Logout successful."})
+    response = make_response(jsonify({"message": "Logout successful."}))
+    response.delete_cookie("identity_id", path="/")
+    return response
 
 @auth_bp.route("/verify-email", methods=["GET"])
 def verify_email():
@@ -226,7 +233,8 @@ def verify_email():
             db.execute("UPDATE users SET email_verified = 1, updated_at = ? WHERE id = ?", (now.isoformat(), row["user_id"]))
             db.execute("UPDATE email_verification_tokens SET used_at = ? WHERE token_hash = ?", (now.isoformat(), token_hash))
     except Exception as e:
-        return redirect(url_for("gui_index") + f"?verify_error=An error occurred: {e}")
+        current_app.logger.error(f"Error during email verification: {e}", exc_info=True)
+        return redirect(url_for("gui_index") + "?verify_error=An error occurred during verification. Please try again.")
         
     return redirect(url_for("gui_index") + "?verify_success=Your email has been verified successfully!")
 
@@ -240,7 +248,8 @@ def resend_verification():
     db = g.db
     user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
     if not user:
-        # Prevent user enumeration (always return success message)
+        # Perform dummy token hashing to balance timing between branches
+        typemeter_db.hash_token("dummy_token_for_timing_mitigation")
         return jsonify({"message": "Verification link sent if the email exists."})
         
     # Check rate limit: max 1 request per 5 minutes per user account
@@ -289,7 +298,8 @@ def forgot_password():
         
     user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
     if not user or user["auth_provider"] != "password":
-        # Safe against user enumeration: always return success message
+        # Perform dummy token hashing to balance timing between branches
+        typemeter_db.hash_token("dummy_token_for_timing_mitigation")
         return jsonify({"message": "If the account exists, a password reset link has been sent."})
         
     # Invalidate older password reset tokens
@@ -352,7 +362,8 @@ def reset_password():
             # Invalidate all active sessions for this user (security requirement)
             typemeter_db.invalidate_user_sessions(db, row["user_id"])
     except Exception as e:
-        return jsonify({"error": f"An error occurred: {e}"}), 500
+        current_app.logger.error(f"Error during password reset: {e}", exc_info=True)
+        return jsonify({"error": "An error occurred while resetting password. Please try again."}), 500
         
     return jsonify({"message": "Password updated successfully. Please log in with your new password."})
 
@@ -378,7 +389,8 @@ def google_callback():
         # Exchanges OAuth code for tokens, verifying signatures and audience claims
         token = oauth.google.authorize_access_token()
     except Exception as e:
-        return redirect(url_for("gui_index") + f"?auth_error=OAuth handshake failed: {e}")
+        current_app.logger.error(f"Error during Google OAuth handshake: {e}", exc_info=True)
+        return redirect(url_for("gui_index") + "?auth_error=OAuth handshake failed. Please try again.")
         
     userinfo = token.get("userinfo")
     if not userinfo:
@@ -388,15 +400,20 @@ def google_callback():
     google_id = userinfo.get("sub")
     email = userinfo.get("email", "").strip().lower()
     name = userinfo.get("name")
+    email_verified = userinfo.get("email_verified", False)
     
     if not google_id or not email:
         return redirect(url_for("gui_index") + "?auth_error=Google profile payload incomplete.")
+        
+    if not email_verified:
+        return redirect(url_for("gui_index") + "?auth_error=Google account email is not verified by Google.")
         
     db = g.db
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     
     # 1. Lookup user by google_id
     user = db.execute("SELECT * FROM users WHERE google_id = ?", (google_id,)).fetchone()
+    is_new_user = False
     if not user:
         # 2. Lookup existing user by email
         user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
@@ -410,6 +427,7 @@ def google_callback():
             user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
         else:
             # 4. Create new Google OAuth account
+            is_new_user = True
             cursor = db.cursor()
             cursor.execute(
                 "INSERT INTO users (email, password_hash, auth_provider, google_id, email_verified, display_name, created_at, updated_at) VALUES (?, NULL, ?, ?, 1, ?, ?, ?)",
@@ -422,11 +440,14 @@ def google_callback():
     session_id = typemeter_db.create_session(db, user["id"])
     session["session_id"] = session_id
     
-    anon_cookie = request.cookies.get("identity_id")
-    if anon_cookie:
-        typemeter_db.migrate_anonymous_data(db, anon_cookie, user["id"])
+    if is_new_user:
+        anon_cookie = request.cookies.get("identity_id")
+        if anon_cookie:
+            typemeter_db.migrate_anonymous_data(db, anon_cookie, user["id"])
     
-    return redirect(url_for("gui_index") + "?auth_success=Login successful via Google!")
+    response = make_response(redirect(url_for("gui_index") + "?auth_success=Login successful via Google!"))
+    response.delete_cookie("identity_id", path="/")
+    return response
 
 @auth_bp.route("/me", methods=["GET"])
 def get_current_user():

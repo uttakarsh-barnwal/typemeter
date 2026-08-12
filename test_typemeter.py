@@ -1,8 +1,9 @@
-#!/usr/bin/env python3
+import os
+os.environ["DATABASE_URL"] = ""
+
 import unittest
 import sqlite3
 import datetime
-import os
 import re
 import typemeter_db
 import fit_priors
@@ -10,6 +11,8 @@ import math
 
 class TestTypeMeter(unittest.TestCase):
     def setUp(self):
+        os.environ["DATABASE_URL"] = ""
+        os.environ.pop("DATABASE_URL", None)
         # Use an in-memory SQLite database initialized with all tables and indexes
         self.conn = typemeter_db.get_db(":memory:")
         
@@ -266,9 +269,11 @@ class TestTypeMeter(unittest.TestCase):
         # 4th request must be blocked
         self.assertFalse(typemeter_db.check_rate_limit(self.conn, "test_ip", "test_action", 3, 60))
 
+os.environ["DATABASE_URL"] = ""
+
 class TestAuthFlask(unittest.TestCase):
     def setUp(self):
-        # Setup temporary SQLite database
+        os.environ["DATABASE_URL"] = ""
         self.db_path = "test_auth_flask.db"
         if os.path.exists(self.db_path):
             os.remove(self.db_path)
