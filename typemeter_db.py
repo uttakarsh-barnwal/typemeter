@@ -8,10 +8,9 @@ import datetime
 import bcrypt
 import hashlib
 import secrets
-import smtplib
 import threading
 import logging
-from email.mime.text import MIMEText
+import requests
 
 # --- Configuration Constants ---
 HALF_LIFE_DAYS = 14.0
@@ -887,21 +886,20 @@ def check_rate_limit(conn, key, action, limit, window_seconds):
 
 def send_email(to_email, subject, body):
     """
-    Sends an email using configured SMTP settings, or fallback to logging in non-production.
-    Loads host/port/credentials dynamically. Uses explicit connection timeout.
+    Sends a transactional email via Brevo HTTPS API, or fallback to logging in non-production.
+    Loads BREVO_API_KEY, SMTP_FROM, and SMTP_FROM_NAME dynamically. Uses explicit connection timeout.
     """
-    host = os.environ.get("SMTP_HOST")
-    port_str = os.environ.get("SMTP_PORT", "587")
-    user = os.environ.get("SMTP_USER")
-    password = os.environ.get("SMTP_PASS")
-    sender = os.environ.get("SMTP_FROM", "noreply@typemeter.local")
+    api_key = os.environ.get("BREVO_API_KEY")
+    sender_email = os.environ.get("SMTP_FROM", "typemeterofficial@gmail.com")
+    sender_name = os.environ.get("SMTP_FROM_NAME", "TypeMeter")
     timeout = int(os.environ.get("SMTP_TIMEOUT", "10"))
     is_prod = (os.environ.get("ENV") == "production")
     
-    if not host or not user or not password:
+    if not api_key:
         if is_prod:
-            import logging
-            logging.getLogger("typemeter").error(f"SMTP is not configured in production mode. Cannot deliver email '{subject}' to {to_email}.")
+            logging.getLogger("typemeter").error(
+                f"BREVO_API_KEY is not configured in production mode. Cannot deliver email '{subject}' to {to_email}."
+            )
             return False
         else:
             print(f"\n==================================================")
@@ -911,26 +909,30 @@ def send_email(to_email, subject, body):
             print(f"==================================================\n")
             return True
             
+    url = "https://api.brevo.com/v3/smtp/email"
+    headers = {
+        "api-key": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    payload = {
+        "sender": {"email": sender_email, "name": sender_name},
+        "to": [{"email": to_email}],
+        "subject": subject,
+        "textContent": body
+    }
+    
     try:
-        port = int(port_str)
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = sender
-        msg["To"] = to_email
-        
-        if port == 465:
-            with smtplib.SMTP_SSL(host, port, timeout=timeout) as server:
-                server.login(user, password)
-                server.sendmail(sender, [to_email], msg.as_string())
+        response = requests.post(url, json=payload, headers=headers, timeout=timeout)
+        if response.status_code in (200, 201, 202):
+            return True
         else:
-            with smtplib.SMTP(host, port, timeout=timeout) as server:
-                server.starttls()
-                server.login(user, password)
-                server.sendmail(sender, [to_email], msg.as_string())
-        return True
+            logging.getLogger("typemeter").error(
+                f"Brevo email API delivery failed to {to_email} (HTTP {response.status_code}): {response.text}"
+            )
+            return False
     except Exception as e:
-        import logging
-        logging.getLogger("typemeter").error(f"SMTP email delivery failed to {to_email}: {e}")
+        logging.getLogger("typemeter").error(f"Brevo email API request exception for {to_email}: {e}")
         return False
 
 def send_email_async(to_email, subject, body):
