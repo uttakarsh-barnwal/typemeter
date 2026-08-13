@@ -389,8 +389,8 @@ class TestAuthFlask(unittest.TestCase):
             body = captured_emails[0][2]
             
             # Extract verify token
-            # format: verify_token=XYZ
-            token_match = re.search(r"verify_token=([A-Za-z0-9_\-]+)", body)
+            # format: token=XYZ
+            token_match = re.search(r"token=([A-Za-z0-9_\-]+)", body)
             self.assertIsNotNone(token_match)
             raw_token = token_match.group(1)
 
@@ -566,7 +566,7 @@ class TestAuthFlask(unittest.TestCase):
             time.sleep(0.1)
             self.assertEqual(len(captured_emails), 1)
             self.assertEqual(captured_emails[0][0], "resend_test@example.com")
-            self.assertIn("verify_token=", captured_emails[0][2])
+            self.assertIn("token=", captured_emails[0][2])
         finally:
             typemeter_db.send_email = orig_send
 
