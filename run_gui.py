@@ -91,17 +91,6 @@ def create_app():
         from flask import g
         g.start_time = time.time()
 
-    @app.before_request
-    def log_proxy_headers():
-        from flask import current_app
-        current_app.logger.info(
-            f"X-Forwarded-Proto={request.headers.get('X-Forwarded-Proto')}, "
-            f"X-Forwarded-Host={request.headers.get('X-Forwarded-Host')}, "
-            f"X-Forwarded-For={request.headers.get('X-Forwarded-For')}, "
-            f"request.scheme={request.scheme}, "
-            f"request.url={request.url}"
-        )
-
     @app.after_request
     def log_request(response):
         from flask import g
