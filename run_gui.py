@@ -55,6 +55,10 @@ def create_app():
     
     app = Flask(__name__, static_folder=gui_dir, static_url_path="")
     
+    # Enable reverse proxy support for HTTPS headers (Render, Heroku, Nginx)
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+    
     # Configure Flask Session signing & Production Safety
     is_prod = (os.environ.get("ENV") == "production")
     if is_prod:

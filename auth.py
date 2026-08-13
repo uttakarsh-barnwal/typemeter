@@ -375,6 +375,7 @@ def google_login():
         return jsonify({"error": "Google Sign-In is not configured on this server."}), 501
         
     redirect_uri = url_for("auth.google_callback", _external=True)
+    current_app.logger.info(f"Google OAuth redirect_uri: {redirect_uri}")
     # Authlib automatically generates a random 'state' parameter, stores it in session,
     # and validates it during callback verification to prevent CSRF.
     return oauth.google.authorize_redirect(redirect_uri)
