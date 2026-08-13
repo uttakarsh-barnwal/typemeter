@@ -96,10 +96,14 @@ def signup():
     )
     db.commit()
     
-    # Send verification email
-    verify_url = url_for("gui_index", _external=True) + f"?verify_token={raw_token}"
+    # Send verification email asynchronously
+    base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    if base_url:
+        verify_url = f"{base_url}/?verify_token={raw_token}"
+    else:
+        verify_url = url_for("gui_index", _external=True) + f"?verify_token={raw_token}"
     email_body = f"Hello,\n\nPlease verify your email by clicking this link:\n{verify_url}\n\nThis link will expire in 24 hours."
-    typemeter_db.send_email(email, "Verify your TypeMeter Account", email_body)
+    typemeter_db.send_email_async(email, "Verify your TypeMeter Account", email_body)
     
     # Create session with fixation protection & migrate anonymous history if present
     # Create session with fixation protection & migrate anonymous history on account creation only
@@ -272,10 +276,14 @@ def resend_verification():
     )
     db.commit()
     
-    # Send verification email
-    verify_url = url_for("gui_index", _external=True) + f"?verify_token={raw_token}"
+    # Send verification email asynchronously
+    base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    if base_url:
+        verify_url = f"{base_url}/?verify_token={raw_token}"
+    else:
+        verify_url = url_for("gui_index", _external=True) + f"?verify_token={raw_token}"
     email_body = f"Hello,\n\nPlease verify your email by clicking this link:\n{verify_url}\n\nThis link will expire in 24 hours."
-    typemeter_db.send_email(email, "Verify your TypeMeter Account", email_body)
+    typemeter_db.send_email_async(email, "Verify your TypeMeter Account", email_body)
     
     return jsonify({"message": "Verification link sent if the email exists."})
 
@@ -318,10 +326,14 @@ def forgot_password():
     )
     db.commit()
     
-    # Send email
-    reset_url = url_for("gui_index", _external=True) + f"?reset_token={raw_token}"
+    # Send email asynchronously
+    base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    if base_url:
+        reset_url = f"{base_url}/?reset_token={raw_token}"
+    else:
+        reset_url = url_for("gui_index", _external=True) + f"?reset_token={raw_token}"
     email_body = f"Hello,\n\nYou requested a password reset. Reset your password by clicking this link:\n{reset_url}\n\nThis link will expire in 1 hour."
-    typemeter_db.send_email(email, "Reset your TypeMeter Password", email_body)
+    typemeter_db.send_email_async(email, "Reset your TypeMeter Password", email_body)
     
     return jsonify({"message": "If the account exists, a password reset link has been sent."})
 
