@@ -304,6 +304,42 @@ class TestTypeMeter(unittest.TestCase):
         finally:
             typemeter_db.send_email = orig_send
 
+    def test_postgres_connection_wrapper_context_manager(self):
+        """Tests that PostgresConnectionWrapper supports the context manager protocol (with db:)."""
+        class DummyPgConn:
+            def __init__(self):
+                self.committed = False
+                self.rolled_back = False
+                self.entered = False
+            def __enter__(self):
+                self.entered = True
+                return self
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                if exc_type is not None:
+                    self.rolled_back = True
+                else:
+                    self.committed = True
+                return False
+
+        # 1. Normal execution context block
+        dummy = DummyPgConn()
+        wrapper = typemeter_db.PostgresConnectionWrapper(dummy)
+        with wrapper as db:
+            self.assertTrue(dummy.entered)
+            self.assertEqual(db, wrapper)
+        self.assertTrue(dummy.committed)
+        self.assertFalse(dummy.rolled_back)
+
+        # 2. Exception context block (must trigger rollback and re-raise)
+        dummy_err = DummyPgConn()
+        wrapper_err = typemeter_db.PostgresConnectionWrapper(dummy_err)
+        with self.assertRaises(ValueError):
+            with wrapper_err:
+                raise ValueError("Simulated transaction error")
+        self.assertTrue(dummy_err.entered)
+        self.assertTrue(dummy_err.rolled_back)
+        self.assertFalse(dummy_err.committed)
+
 os.environ["DATABASE_URL"] = ""
 
 class TestAuthFlask(unittest.TestCase):

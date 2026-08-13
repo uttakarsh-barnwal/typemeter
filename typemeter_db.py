@@ -236,6 +236,20 @@ class PostgresConnectionWrapper:
         else:
             self._conn.close()
 
+    def __enter__(self):
+        if hasattr(self._conn, "__enter__"):
+            self._conn.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if hasattr(self._conn, "__exit__"):
+            return self._conn.__exit__(exc_type, exc_val, exc_tb)
+        if exc_type is not None:
+            self.rollback()
+        else:
+            self.commit()
+        return False
+
 def init_postgres_schema(pg_conn):
     """Executes PostgreSQL DDL statements."""
     cursor = pg_conn.cursor()
