@@ -9,6 +9,8 @@ import bcrypt
 import hashlib
 import secrets
 import smtplib
+import threading
+import logging
 from email.mime.text import MIMEText
 
 # --- Configuration Constants ---
@@ -933,18 +935,11 @@ def send_email(to_email, subject, body):
 
 def send_email_async(to_email, subject, body):
     """Dispatches send_email asynchronously in a daemon background thread."""
-    import sys
-    import typemeter_db
-
-    # In unit test runs, execute synchronously so test assertions on mocked send_email pass deterministically
-    if any("unittest" in m for m in sys.modules) and os.environ.get("ENV") != "production":
-        return typemeter_db.send_email(to_email, subject, body)
-
     def _worker():
         try:
+            import typemeter_db
             typemeter_db.send_email(to_email, subject, body)
         except Exception as e:
-            import logging
             logging.getLogger("typemeter").error(f"Async email dispatch error: {e}")
 
     thread = threading.Thread(target=_worker, daemon=True)

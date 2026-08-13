@@ -5,9 +5,11 @@ import unittest
 import sqlite3
 import datetime
 import re
+import math
+import time
+import threading
 import typemeter_db
 import fit_priors
-import math
 
 class TestTypeMeter(unittest.TestCase):
     def setUp(self):
@@ -284,6 +286,24 @@ class TestTypeMeter(unittest.TestCase):
         self.assertEqual(typemeter_db._extract_count((7,), "cnt"), 7)
         self.assertEqual(typemeter_db._extract_count(None, "cnt"), 0)
 
+    def test_send_email_async_direct_thread_execution(self):
+        """Directly tests send_email_async end-to-end to confirm threading.Thread spawns, executes, and invokes send_email."""
+        captured = []
+        orig_send = typemeter_db.send_email
+        typemeter_db.send_email = lambda to, sub, body: captured.append((to, sub, body))
+
+        try:
+            thread = typemeter_db.send_email_async("async_direct@example.com", "Direct Subject", "Direct Body")
+            self.assertIsInstance(thread, threading.Thread)
+            thread.join(timeout=2.0)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0][0], "async_direct@example.com")
+            self.assertEqual(captured[0][1], "Direct Subject")
+            self.assertEqual(captured[0][2], "Direct Body")
+        finally:
+            typemeter_db.send_email = orig_send
+
 os.environ["DATABASE_URL"] = ""
 
 class TestAuthFlask(unittest.TestCase):
@@ -483,6 +503,7 @@ class TestAuthFlask(unittest.TestCase):
                 json={"email": "reset@example.com"}
             )
             self.assertEqual(res_forgot.status_code, 200)
+            time.sleep(0.1)
             self.assertEqual(len(captured_emails), 1)
 
             # Extract reset token
@@ -511,6 +532,41 @@ class TestAuthFlask(unittest.TestCase):
             )
             self.assertEqual(res_login2.status_code, 200)
 
+        finally:
+            typemeter_db.send_email = orig_send
+
+    def test_resend_verification_endpoint(self):
+        captured_emails = []
+        orig_send = typemeter_db.send_email
+        typemeter_db.send_email = lambda to, sub, body: captured_emails.append((to, sub, body))
+
+        try:
+            csrf_token = self.client.get("/auth/csrf-token").get_json()["csrf_token"]
+
+            # 1. Register a new user
+            signup_res = self.client.post(
+                "/auth/signup",
+                headers={"X-CSRF-Token": csrf_token},
+                json={"email": "resend_test@example.com", "password": "Password123", "display_name": "Resend Test"}
+            )
+            self.assertEqual(signup_res.status_code, 201)
+            time.sleep(0.1)
+            self.assertEqual(len(captured_emails), 1)
+
+            # Clear captured emails list
+            captured_emails.clear()
+
+            # 2. Trigger resend verification
+            resend_res = self.client.post(
+                "/auth/resend-verification",
+                headers={"X-CSRF-Token": csrf_token},
+                json={"email": "resend_test@example.com"}
+            )
+            self.assertEqual(resend_res.status_code, 200)
+            time.sleep(0.1)
+            self.assertEqual(len(captured_emails), 1)
+            self.assertEqual(captured_emails[0][0], "resend_test@example.com")
+            self.assertIn("verify_token=", captured_emails[0][2])
         finally:
             typemeter_db.send_email = orig_send
 
