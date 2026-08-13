@@ -828,6 +828,30 @@ def hash_token(token):
     """Hashes a raw token with SHA-256 to prevent leakage in case of database dumps."""
     return hashlib.sha256(token.encode('utf-8')).hexdigest()
 
+def _extract_count(row, key="cnt"):
+    """Safely extracts an aggregate count value from a database row (dict, sqlite3.Row, or tuple)."""
+    if not row:
+        return 0
+    if isinstance(row, dict):
+        if key in row:
+            return row[key]
+        vals = list(row.values())
+        return vals[0] if vals else 0
+    if hasattr(row, "keys"):
+        try:
+            keys = row.keys()
+            if key in keys:
+                return row[key]
+        except Exception:
+            pass
+    try:
+        return row[0]
+    except (TypeError, KeyError, IndexError):
+        if hasattr(row, "values"):
+            vals = list(row.values())
+            return vals[0] if vals else 0
+        return 0
+
 def check_rate_limit(conn, key, action, limit, window_seconds):
     """
     Lightweight, persistent database-backed rate limiter.
@@ -842,10 +866,11 @@ def check_rate_limit(conn, key, action, limit, window_seconds):
     
     # Count requests
     cursor.execute(
-        "SELECT COUNT(*) FROM ip_rate_limits WHERE key = ? AND action = ? AND timestamp >= ?",
+        "SELECT COUNT(*) AS cnt FROM ip_rate_limits WHERE key = ? AND action = ? AND timestamp >= ?",
         (key, action, cutoff)
     )
-    count = cursor.fetchone()[0]
+    count_row = cursor.fetchone()
+    count = _extract_count(count_row, "cnt")
     
     if count >= limit:
         return False
@@ -1022,8 +1047,8 @@ def save_typing_session(conn, identity_id, user_id, data):
 def get_user_history(conn, user_id, limit=50, offset=0):
     """Retrieves paginated typing session history for a logged-in user."""
     cursor = conn.cursor()
-    count_row = cursor.execute("SELECT COUNT(*) FROM typing_sessions WHERE user_id = ?", (user_id,)).fetchone()
-    total_count = count_row[0] if count_row else 0
+    count_row = cursor.execute("SELECT COUNT(*) AS cnt FROM typing_sessions WHERE user_id = ?", (user_id,)).fetchone()
+    total_count = _extract_count(count_row, "cnt")
     
     rows = cursor.execute("""
         SELECT id, wpm, raw_wpm, accuracy, mistakes_count, total_chars, time_seconds, difficulty, created_at

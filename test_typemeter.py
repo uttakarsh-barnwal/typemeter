@@ -269,6 +269,21 @@ class TestTypeMeter(unittest.TestCase):
         # 4th request must be blocked
         self.assertFalse(typemeter_db.check_rate_limit(self.conn, "test_ip", "test_action", 3, 60))
 
+    def test_extract_count_and_dict_row_support(self):
+        """Tests that _extract_count cleanly handles dicts (Postgres RealDictCursor), sqlite3.Row, and tuples."""
+        # 1. Test dict (PostgreSQL RealDictCursor style)
+        self.assertEqual(typemeter_db._extract_count({"cnt": 42}, "cnt"), 42)
+        self.assertEqual(typemeter_db._extract_count({"count(*)": 15}, "cnt"), 15)
+
+        # 2. Test sqlite3.Row
+        cur = self.conn.cursor()
+        row = cur.execute("SELECT 99 AS cnt").fetchone()
+        self.assertEqual(typemeter_db._extract_count(row, "cnt"), 99)
+
+        # 3. Test tuple and empty cases
+        self.assertEqual(typemeter_db._extract_count((7,), "cnt"), 7)
+        self.assertEqual(typemeter_db._extract_count(None, "cnt"), 0)
+
 os.environ["DATABASE_URL"] = ""
 
 class TestAuthFlask(unittest.TestCase):
